@@ -12,7 +12,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/supxh/kilo-newapi-adapter/internal/adapter"
+	"github.com/webwww123/kilo-newapi-adapter/internal/adapter"
 )
 
 func main() {
