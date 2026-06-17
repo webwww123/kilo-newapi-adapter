@@ -4,13 +4,13 @@
 
 **Goal:** Build a Go adapter that gives NewAPI one upstream base URL for Kilo Chat Completions, Responses, and Messages.
 
-**Architecture:** A focused Go HTTP service handles path routing, model alias rewriting, sanitized upstream proxying, local count-token fallback, and simple health checks. Kilo already supports the three response protocols, so the adapter avoids unnecessary response conversion.
+**Architecture:** A focused Go HTTP service handles path routing, sanitized upstream proxying, local count-token fallback, and simple health checks. Kilo already supports the three response protocols, so the adapter avoids unnecessary response conversion or model name mapping.
 
 **Tech Stack:** Go standard library, `httptest` unit tests, Docker, systemd.
 
 ---
 
-### Task 1: Request Routing And Alias Tests
+### Task 1: Request Routing And Model Pass-Through Tests
 
 **Files:**
 - Create: `go.mod`
@@ -18,11 +18,11 @@
 - Create: `internal/adapter/proxy.go`
 - Test: `internal/adapter/proxy_test.go`
 
-- [ ] Write tests for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, and non-`/v1` path variants.
+- [ ] Write tests for `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/models`, model pass-through, and non-`/v1` path variants.
 - [ ] Verify tests fail before implementation.
-- [ ] Implement route mapping and model alias rewriting.
+- [ ] Implement route mapping and model pass-through.
 - [ ] Verify tests pass.
-- [ ] Commit routing and alias behavior.
+- [ ] Commit routing behavior.
 
 ### Task 2: Header Sanitizing And Count Tokens
 
@@ -63,4 +63,3 @@
 - [ ] Review `git status`, `git diff --cached`, and secret exposure risk.
 - [ ] Create GitHub repository and push `main`.
 - [ ] Return repository link and verification summary.
-

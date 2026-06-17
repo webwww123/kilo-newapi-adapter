@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -88,17 +87,9 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "upstream_error", "failed to read upstream response")
-		return
-	}
-
-	body = injectAliasModels(body, h.cfg.ModelAliases)
 	copyResponseHeaders(w.Header(), resp.Header)
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(body)
+	copyStreaming(w, resp.Body)
 }
 
 func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string) {
@@ -113,7 +104,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	body, err = h.rewriteRequestBody(body)
+	body, err = validateJSONBody(body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return
@@ -131,31 +122,16 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	copyStreaming(w, resp.Body)
 }
 
-func (h *Handler) rewriteRequestBody(body []byte) ([]byte, error) {
+func validateJSONBody(body []byte) ([]byte, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
 		return nil, errors.New("empty JSON body")
 	}
-
-	var payload map[string]any
+	var payload any
 	if err := json.Unmarshal(trimmed, &payload); err != nil {
 		return nil, fmt.Errorf("invalid JSON body: %w", err)
 	}
-
-	model, _ := payload["model"].(string)
-	if strings.TrimSpace(model) == "" {
-		model = h.cfg.DefaultModel
-	}
-	if target, ok := h.cfg.ModelAliases[model]; ok {
-		model = target
-	}
-	payload["model"] = model
-
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("encode JSON body: %w", err)
-	}
-	return encoded, nil
+	return trimmed, nil
 }
 
 func (h *Handler) forward(original *http.Request, upstreamPath string, body io.Reader) (*http.Response, error) {
@@ -272,51 +248,6 @@ func copyStreaming(w http.ResponseWriter, r io.Reader) {
 			return
 		}
 	}
-}
-
-func injectAliasModels(body []byte, aliases map[string]string) []byte {
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
-	}
-
-	data, _ := payload["data"].([]any)
-	existing := map[string]struct{}{}
-	for _, item := range data {
-		if model, ok := item.(map[string]any); ok {
-			if id, ok := model["id"].(string); ok {
-				existing[id] = struct{}{}
-			}
-		}
-	}
-
-	names := make([]string, 0, len(aliases))
-	for name := range aliases {
-		if _, ok := existing[name]; !ok {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-
-	injected := make([]any, 0, len(names)+len(data))
-	for _, name := range names {
-		injected = append(injected, map[string]any{
-			"id":       name,
-			"object":   "model",
-			"created":  0,
-			"owned_by": "kilo-newapi-adapter",
-			"root":     aliases[name],
-		})
-	}
-	injected = append(injected, data...)
-	payload["object"] = "list"
-	payload["data"] = injected
-
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return body
-	}
-	return encoded
 }
 
 func approximateTokens(body []byte) int {

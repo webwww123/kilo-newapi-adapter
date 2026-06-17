@@ -15,21 +15,13 @@ The adapter is a small Go HTTP service. NewAPI points at the adapter as a single
 
 Non-`/v1` variants are also accepted for compatibility with relays that strip the prefix.
 
-## Model Aliases
+## Model Names
 
-The default public model alias is `v1chat`. It rewrites to `nvidia/nemotron-3-super-120b-a12b:free`, which was probed successfully for all three protocols without an upstream key.
-
-Aliases are configurable with `MODEL_ALIASES`, for example:
-
-```text
-MODEL_ALIASES=v1chat=nvidia/nemotron-3-super-120b-a12b:free,kilo-free=kilo-auto/free
-```
-
-If a request has no `model`, the adapter inserts `DEFAULT_MODEL`, defaulting to `v1chat`.
+The adapter does not rewrite, map, or inject public model names. Requests are forwarded with their original `model` value, and `/v1/models` proxies the full Kilo model list directly.
 
 ## Request Handling
 
-The adapter parses JSON requests, rewrites the top-level `model` field when it matches an alias, then forwards the request body to Kilo. Client `Authorization`, `Cookie`, and proxy/debug headers are not forwarded upstream. If `KILO_API_KEY` is configured, the adapter uses that value as the upstream bearer token.
+The adapter validates JSON requests, then forwards the request body to Kilo without changing model names. Client `Authorization`, `Cookie`, and proxy/debug headers are not forwarded upstream. If `KILO_API_KEY` is configured, the adapter uses that value as the upstream bearer token.
 
 Streaming bodies are proxied without protocol conversion. Kilo already returns Chat, Responses, and Messages shapes for the matching endpoint.
 
@@ -46,4 +38,3 @@ This prevents clients that preflight token counts from failing even when the ups
 ## Operations
 
 The service includes `GET /healthz`, Docker support, and a systemd unit template. Logs are structural only: method, path, upstream path, status, duration, and byte count. Request bodies and secrets are not logged.
-

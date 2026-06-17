@@ -33,7 +33,7 @@ func main() {
 
 	errs := make(chan error, 1)
 	go func() {
-		log.Printf("kilo-newapi-adapter listening on %s, upstream=%s, default_model=%s", addr, cfg.UpstreamBaseURL, cfg.DefaultModel)
+		log.Printf("kilo-newapi-adapter listening on %s, upstream=%s", addr, cfg.UpstreamBaseURL)
 		errs <- server.ListenAndServe()
 	}()
 

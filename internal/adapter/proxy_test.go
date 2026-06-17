@@ -58,11 +58,6 @@ func newRecordingUpstream(t *testing.T) (*httptest.Server, *[]upstreamCall) {
 func newTestHandler(upstreamURL string) http.Handler {
 	cfg := Config{
 		UpstreamBaseURL: upstreamURL,
-		DefaultModel:    "v1chat",
-		ModelAliases: map[string]string{
-			"v1chat":   "real/free",
-			"kilo-pro": "real/pro",
-		},
 	}
 	return NewHandler(cfg)
 }
@@ -94,7 +89,7 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 			name:         "chat completions",
 			method:       http.MethodPost,
 			path:         "/v1/chat/completions",
-			body:         `{"model":"v1chat","messages":[{"role":"user","content":"hi"}]}`,
+			body:         `{"model":"some/model","messages":[{"role":"user","content":"hi"}]}`,
 			upstreamPath: "/chat/completions",
 		},
 		{
@@ -143,17 +138,17 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 		})
 	}
 
-	if (*calls)[0].Body["model"] != "real/free" {
-		t.Fatalf("v1chat alias was not rewritten: %#v", (*calls)[0].Body["model"])
+	if (*calls)[0].Body["model"] != "some/model" {
+		t.Fatalf("model should pass through unchanged: %#v", (*calls)[0].Body["model"])
 	}
-	if (*calls)[1].Body["model"] != "real/pro" {
-		t.Fatalf("kilo-pro alias was not rewritten: %#v", (*calls)[1].Body["model"])
+	if (*calls)[1].Body["model"] != "kilo-pro" {
+		t.Fatalf("model should pass through unchanged: %#v", (*calls)[1].Body["model"])
 	}
 	if (*calls)[2].Body["model"] != "unknown-model" {
 		t.Fatalf("unknown model should pass through unchanged: %#v", (*calls)[2].Body["model"])
 	}
-	if (*calls)[3].Body["model"] != "real/free" {
-		t.Fatalf("missing model should default through alias: %#v", (*calls)[3].Body["model"])
+	if _, ok := (*calls)[3].Body["model"]; ok {
+		t.Fatalf("missing model should remain missing, got: %#v", (*calls)[3].Body["model"])
 	}
 }
 
@@ -164,12 +159,10 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	cfg := Config{
 		UpstreamBaseURL: upstream.URL,
 		UpstreamAPIKey:  "upstream-token",
-		DefaultModel:    "v1chat",
-		ModelAliases:    map[string]string{"v1chat": "real/free"},
 	}
 	handler := NewHandler(cfg)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"v1chat","messages":[]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"some/model","messages":[]}`))
 	req.Header.Set("Authorization", "Bearer client-token")
 	req.Header.Set("Cookie", "session=client")
 	req.Header.Set("X-Provider-Base-URL", "https://example.invalid")
@@ -197,7 +190,7 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 }
 
-func TestModelsInjectsAliasEntries(t *testing.T) {
+func TestModelsProxiesUpstreamListWithoutInjectingAliases(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
 
@@ -223,14 +216,10 @@ func TestModelsInjectsAliasEntries(t *testing.T) {
 		t.Fatalf("decode models response: %v", err)
 	}
 
-	var sawAlias bool
 	for _, model := range payload.Data {
-		if model.ID == "v1chat" {
-			sawAlias = true
+		if model.ID == "fake-alias" {
+			t.Fatalf("models response should not inject public aliases: %s", rec.Body.String())
 		}
-	}
-	if !sawAlias {
-		t.Fatalf("models response did not include v1chat alias: %s", rec.Body.String())
 	}
 }
 
@@ -239,7 +228,7 @@ func TestCountTokensReturnsLocalAnthropicShape(t *testing.T) {
 	defer upstream.Close()
 
 	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/messages/count_tokens", `{"model":"v1chat","messages":[{"role":"user","content":"hello world"}]}`)
+	rec := postJSON(t, handler, "/v1/messages/count_tokens", `{"model":"some/model","messages":[{"role":"user","content":"hello world"}]}`)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())

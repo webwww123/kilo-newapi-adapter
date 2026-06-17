@@ -6,7 +6,7 @@ Single-base adapter for putting Kilo's no-key gateway behind NewAPI while servin
 - OpenAI Responses: `/v1/responses`
 - Anthropic Messages: `/v1/messages`
 
-The adapter rewrites standard paths to Kilo gateway paths and maps public model aliases like `v1chat` to real Kilo free model IDs.
+The adapter rewrites standard paths to Kilo gateway paths. It does not rewrite model names.
 
 ## Default Mapping
 
@@ -19,11 +19,7 @@ The adapter rewrites standard paths to Kilo gateway paths and maps public model 
 
 The non-`/v1` variants are also accepted, for relays that strip the prefix.
 
-Default model alias:
-
-```text
-v1chat -> nvidia/nemotron-3-super-120b-a12b:free
-```
+`/v1/models` proxies Kilo's full upstream model list directly.
 
 ## Run
 
@@ -41,21 +37,15 @@ Use one upstream/base URL:
 http://127.0.0.1:18083
 ```
 
-Expose model name:
-
-```text
-v1chat
-```
-
 If your NewAPI build appends `/v1`, use the same base URL. The adapter accepts both `/v1/chat/completions` and `/chat/completions`.
+
+Use model IDs returned by `/v1/models`, for example `nvidia/nemotron-3-super-120b-a12b:free`.
 
 ## Environment
 
 ```text
 ADDR=:18083
 KILO_BASE_URL=https://api.kilo.ai/api/gateway
-DEFAULT_MODEL=v1chat
-MODEL_ALIASES=v1chat=nvidia/nemotron-3-super-120b-a12b:free,kilo-free=kilo-auto/free
 MAX_BODY_BYTES=10485760
 UPSTREAM_TIMEOUT=180s
 ```
@@ -69,7 +59,7 @@ Chat Completions:
 ```bash
 curl -sS http://127.0.0.1:18083/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"v1chat","messages":[{"role":"user","content":"Reply with exactly OK and no other text."}],"max_tokens":64}' | jq
+  -d '{"model":"nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"Reply with exactly OK and no other text."}],"max_tokens":64}' | jq
 ```
 
 Responses:
@@ -77,7 +67,7 @@ Responses:
 ```bash
 curl -sS http://127.0.0.1:18083/v1/responses \
   -H 'Content-Type: application/json' \
-  -d '{"model":"v1chat","input":"Reply with exactly OK and no other text.","max_output_tokens":64}' | jq
+  -d '{"model":"nvidia/nemotron-3-super-120b-a12b:free","input":"Reply with exactly OK and no other text.","max_output_tokens":64}' | jq
 ```
 
 Messages:
@@ -85,7 +75,7 @@ Messages:
 ```bash
 curl -sS http://127.0.0.1:18083/v1/messages \
   -H 'Content-Type: application/json' \
-  -d '{"model":"v1chat","messages":[{"role":"user","content":"Reply with exactly OK and no other text."}],"max_tokens":64}' | jq
+  -d '{"model":"nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"Reply with exactly OK and no other text."}],"max_tokens":64}' | jq
 ```
 
 Count tokens fallback:
@@ -93,7 +83,7 @@ Count tokens fallback:
 ```bash
 curl -sS http://127.0.0.1:18083/v1/messages/count_tokens \
   -H 'Content-Type: application/json' \
-  -d '{"model":"v1chat","messages":[{"role":"user","content":"hello"}]}' | jq
+  -d '{"model":"nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"hello"}]}' | jq
 ```
 
 ## Docker
@@ -111,4 +101,3 @@ sudo cp deploy/kilo-newapi-adapter.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now kilo-newapi-adapter
 ```
-
