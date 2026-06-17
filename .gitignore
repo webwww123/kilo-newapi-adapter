@@ -1,0 +1,8 @@
+/bin/
+/dist/
+*.log
+*.pid
+.env
+.env.*
+!.env.example
+

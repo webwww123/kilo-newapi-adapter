@@ -1,0 +1,20 @@
+[Unit]
+Description=Kilo NewAPI Adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kilo-newapi-adapter.env
+ExecStart=/usr/local/bin/kilo-newapi-adapter
+Restart=always
+RestartSec=3
+User=root
+WorkingDirectory=/opt/kilo-newapi-adapter
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+
