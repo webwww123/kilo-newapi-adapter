@@ -1,8 +1,8 @@
 /bin/
 /dist/
+/kilo-newapi-adapter
 *.log
 *.pid
 .env
 .env.*
 !.env.example
-
