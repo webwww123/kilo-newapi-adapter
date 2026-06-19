@@ -17,6 +17,11 @@ type Config struct {
 	UpstreamAPIKey  string
 	MaxBodyBytes    int64
 	HTTPClient      *http.Client
+
+	RequestLogEnabled   bool
+	RequestLogDir       string
+	RequestLogRetention time.Duration
+	RequestLogBodyLimit int64
 }
 
 func ConfigFromEnv() Config {
@@ -24,6 +29,13 @@ func ConfigFromEnv() Config {
 		UpstreamBaseURL: strings.TrimSpace(os.Getenv("KILO_BASE_URL")),
 		UpstreamAPIKey:  strings.TrimSpace(os.Getenv("KILO_API_KEY")),
 		MaxBodyBytes:    parseInt64(os.Getenv("MAX_BODY_BYTES"), 10<<20),
+		RequestLogEnabled: parseBool(
+			os.Getenv("REQUEST_LOG_ENABLED"),
+			true,
+		),
+		RequestLogDir:       strings.TrimSpace(os.Getenv("REQUEST_LOG_DIR")),
+		RequestLogRetention: parseDuration(os.Getenv("REQUEST_LOG_RETENTION"), 48*time.Hour),
+		RequestLogBodyLimit: parseInt64(os.Getenv("REQUEST_LOG_BODY_LIMIT"), 1<<20),
 		HTTPClient: &http.Client{
 			Timeout: parseDuration(os.Getenv("UPSTREAM_TIMEOUT"), 180*time.Second),
 		},
@@ -39,6 +51,15 @@ func (cfg Config) WithDefaults() Config {
 
 	if cfg.MaxBodyBytes <= 0 {
 		cfg.MaxBodyBytes = 10 << 20
+	}
+	if cfg.RequestLogDir == "" {
+		cfg.RequestLogDir = "/var/log/kilo-newapi-adapter"
+	}
+	if cfg.RequestLogRetention <= 0 {
+		cfg.RequestLogRetention = 48 * time.Hour
+	}
+	if cfg.RequestLogBodyLimit <= 0 {
+		cfg.RequestLogBodyLimit = 1 << 20
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = &http.Client{Timeout: 180 * time.Second}
@@ -66,4 +87,19 @@ func parseDuration(raw string, fallback time.Duration) time.Duration {
 		return fallback
 	}
 	return value
+}
+
+func parseBool(raw string, fallback bool) bool {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
 }

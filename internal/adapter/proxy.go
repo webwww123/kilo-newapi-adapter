@@ -13,11 +13,24 @@ import (
 )
 
 type Handler struct {
-	cfg Config
+	cfg    Config
+	logger *requestLogger
 }
 
 func NewHandler(cfg Config) http.Handler {
-	return &Handler{cfg: cfg.WithDefaults()}
+	cfg = cfg.WithDefaults()
+	var logger *requestLogger
+	if cfg.RequestLogEnabled || strings.TrimSpace(cfg.RequestLogDir) != "" {
+		logger = newRequestLogger(RequestLogConfig{
+			Dir:       cfg.RequestLogDir,
+			Retention: cfg.RequestLogRetention,
+			BodyLimit: cfg.RequestLogBodyLimit,
+		})
+		if err := logger.cleanup(); err != nil {
+			fmt.Printf("request_log_cleanup_error=%v\n", err)
+		}
+	}
+	return &Handler{cfg: cfg, logger: logger}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,17 +50,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/healthz":
 		h.handleHealth(lw, r)
 	case "/messages/count_tokens":
-		h.handleCountTokens(lw, r)
+		h.handleCountTokens(lw, r, start)
 	case "/models":
-		h.handleModels(lw, r)
+		h.handleModels(lw, r, start)
 	case "/chat/completions":
-		h.handleProxy(lw, r, "/chat/completions")
+		h.handleProxy(lw, r, "/chat/completions", start)
 	case "/responses":
-		h.handleProxy(lw, r, "/responses")
+		h.handleProxy(lw, r, "/responses", start)
 	case "/messages":
-		h.handleProxy(lw, r, "/messages")
+		h.handleProxy(lw, r, "/messages", start)
 	default:
 		writeJSONError(lw, http.StatusNotFound, "not_found", "unsupported adapter path")
+		h.recordRequest(start, r, "", nil, responseLogCapture{
+			status:       http.StatusNotFound,
+			bytesWritten: bytesWritten,
+			adapterError: "unsupported adapter path",
+		})
 	}
 }
 
@@ -60,66 +78,163 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("ok\n"))
 }
 
-func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request, start time.Time) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		h.recordRequest(start, r, "", nil, responseLogCapture{
+			status:       http.StatusMethodNotAllowed,
+			adapterError: "method not allowed",
+		})
 		return
 	}
 	body, err := readLimited(r.Body, h.cfg.MaxBodyBytes)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, "", nil, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
 		return
 	}
 	payload := map[string]int{"input_tokens": approximateTokens(body)}
 	writeJSON(w, http.StatusOK, payload)
+	h.recordRequest(start, r, "", body, responseLogCapture{
+		status:      http.StatusOK,
+		contentType: "application/json",
+		body:        []byte(fmt.Sprintf(`{"input_tokens":%d}`, payload["input_tokens"])),
+	})
 }
 
-func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start time.Time) {
 	if r.Method != http.MethodGet {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		h.recordRequest(start, r, "/models", nil, responseLogCapture{
+			status:       http.StatusMethodNotAllowed,
+			adapterError: "method not allowed",
+		})
 		return
 	}
 
 	resp, err := h.forward(r, "/models", nil)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
+		h.recordRequest(start, r, "/models", nil, responseLogCapture{
+			status:        http.StatusBadGateway,
+			upstreamError: err.Error(),
+		})
 		return
 	}
 	defer resp.Body.Close()
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	copyStreaming(w, resp.Body)
+	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+	copyStreamingWithCapture(w, resp.Body, capture)
+	h.recordRequest(start, r, "/models", nil, responseLogCapture{
+		status:        resp.StatusCode,
+		bytesWritten:  capture.Total(),
+		contentType:   resp.Header.Get("Content-Type"),
+		body:          capture.Bytes(),
+		bodyTruncated: capture.Truncated(),
+	})
 }
 
-func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string) {
+func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string, start time.Time) {
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		h.recordRequest(start, r, upstreamPath, nil, responseLogCapture{
+			status:       http.StatusMethodNotAllowed,
+			adapterError: "method not allowed",
+		})
 		return
 	}
 
 	body, err := readLimited(r.Body, h.cfg.MaxBodyBytes)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, nil, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
 		return
 	}
 
 	body, err = validateJSONBody(body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
 		return
 	}
 
 	resp, err := h.forward(r, upstreamPath, bytes.NewReader(body))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:        http.StatusBadGateway,
+			upstreamError: err.Error(),
+		})
 		return
 	}
 	defer resp.Body.Close()
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	copyStreaming(w, resp.Body)
+	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+	copyStreamingWithCapture(w, resp.Body, capture)
+	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+		status:        resp.StatusCode,
+		bytesWritten:  capture.Total(),
+		contentType:   resp.Header.Get("Content-Type"),
+		body:          capture.Bytes(),
+		bodyTruncated: capture.Truncated(),
+	})
+}
+
+type responseLogCapture struct {
+	status        int
+	bytesWritten  int64
+	contentType   string
+	body          []byte
+	bodyTruncated bool
+	adapterError  string
+	upstreamError string
+}
+
+func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath string, body []byte, resp responseLogCapture) {
+	if h.logger == nil {
+		return
+	}
+	if resp.status == 0 {
+		resp.status = http.StatusOK
+	}
+	if resp.bytesWritten == 0 {
+		resp.bytesWritten = int64(len(resp.body))
+	}
+	err := h.logger.record(loggableRequest{
+		Method:       r.Method,
+		Path:         r.URL.Path,
+		Query:        r.URL.RawQuery,
+		UpstreamPath: upstreamPath,
+		RemoteAddr:   r.RemoteAddr,
+		UserAgent:    r.UserAgent(),
+		ContentType:  r.Header.Get("Content-Type"),
+		Body:         body,
+	}, loggableResponse{
+		Status:        resp.status,
+		Duration:      time.Since(start),
+		BytesWritten:  resp.bytesWritten,
+		ContentType:   resp.contentType,
+		Body:          resp.body,
+		Truncated:     resp.bodyTruncated,
+		AdapterError:  resp.adapterError,
+		UpstreamError: resp.upstreamError,
+	})
+	if err != nil {
+		fmt.Printf("request_log_error=%v\n", err)
+	}
 }
 
 func validateJSONBody(body []byte) ([]byte, error) {

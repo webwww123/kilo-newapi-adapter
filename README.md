@@ -48,9 +48,17 @@ ADDR=:18083
 KILO_BASE_URL=https://api.kilo.ai/api/gateway
 MAX_BODY_BYTES=10485760
 UPSTREAM_TIMEOUT=180s
+REQUEST_LOG_ENABLED=true
+REQUEST_LOG_DIR=/var/log/kilo-newapi-adapter
+REQUEST_LOG_RETENTION=48h
+REQUEST_LOG_BODY_LIMIT=1048576
 ```
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
+
+Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
+Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.
+The log directory is created with `0700`, files are created with `0600`, and files older than `REQUEST_LOG_RETENTION` are removed at startup.
 
 ## Probes
 
