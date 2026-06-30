@@ -12,6 +12,8 @@ import (
 	"unicode/utf8"
 )
 
+const publicModelPrefix = "kilo/"
+
 type Handler struct {
 	cfg    Config
 	logger *requestLogger
@@ -126,10 +128,22 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start tim
 	}
 	defer resp.Body.Close()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream response read failed")
+		h.recordRequest(start, r, "/models", nil, responseLogCapture{
+			status:        http.StatusBadGateway,
+			upstreamError: err.Error(),
+		})
+		return
+	}
+	body = prefixModelsResponse(body)
+
 	copyResponseHeaders(w.Header(), resp.Header)
+	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
-	copyStreamingWithCapture(w, resp.Body, capture)
+	_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(body), capture))
 	h.recordRequest(start, r, "/models", nil, responseLogCapture{
 		status:        resp.StatusCode,
 		bytesWritten:  capture.Total(),
@@ -160,6 +174,16 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	}
 
 	body, err = validateJSONBody(body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+
+	body, err = stripPublicModelPrefix(body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
@@ -247,6 +271,60 @@ func validateJSONBody(body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid JSON body: %w", err)
 	}
 	return trimmed, nil
+}
+
+func stripPublicModelPrefix(body []byte) ([]byte, error) {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if object, ok := payload.(map[string]any); ok {
+		if raw, ok := object["model"].(string); ok {
+			object["model"] = strings.TrimPrefix(raw, publicModelPrefix)
+		}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
+}
+
+func prefixModelsResponse(body []byte) []byte {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if object, ok := payload.(map[string]any); ok {
+		prefixModelsData(object["data"])
+	} else {
+		prefixModelsData(payload)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func prefixModelsData(value any) {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if model, ok := item.(map[string]any); ok {
+				if raw, ok := model["id"].(string); ok {
+					model["id"] = prefixPublicModel(raw)
+				}
+			}
+		}
+	}
+}
+
+func prefixPublicModel(model string) string {
+	if strings.HasPrefix(model, publicModelPrefix) {
+		return model
+	}
+	return publicModelPrefix + model
 }
 
 func (h *Handler) forward(original *http.Request, upstreamPath string, body io.Reader) (*http.Response, error) {

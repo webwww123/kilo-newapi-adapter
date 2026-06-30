@@ -6,7 +6,8 @@ Single-base adapter for putting Kilo's no-key gateway behind NewAPI while servin
 - OpenAI Responses: `/v1/responses`
 - Anthropic Messages: `/v1/messages`
 
-The adapter rewrites standard paths to Kilo gateway paths. It does not rewrite model names.
+The adapter rewrites standard paths to Kilo gateway paths. Public model IDs are exposed with
+the `kilo/` prefix, and that prefix is stripped before forwarding requests to Kilo.
 
 ## Default Mapping
 
@@ -19,7 +20,7 @@ The adapter rewrites standard paths to Kilo gateway paths. It does not rewrite m
 
 The non-`/v1` variants are also accepted, for relays that strip the prefix.
 
-`/v1/models` proxies Kilo's full upstream model list directly.
+`/v1/models` returns Kilo's full upstream model list with `kilo/` prefixed IDs.
 
 ## Run
 
@@ -39,7 +40,8 @@ http://127.0.0.1:18083
 
 If your NewAPI build appends `/v1`, use the same base URL. The adapter accepts both `/v1/chat/completions` and `/chat/completions`.
 
-Use model IDs returned by `/v1/models`, for example `nvidia/nemotron-3-super-120b-a12b:free`.
+Use model IDs returned by `/v1/models`, for example `kilo/nvidia/nemotron-3-super-120b-a12b:free`.
+For compatibility, unprefixed model IDs are still accepted and forwarded unchanged.
 
 ## Environment
 

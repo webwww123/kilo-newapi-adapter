@@ -96,7 +96,7 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 			name:         "responses",
 			method:       http.MethodPost,
 			path:         "/v1/responses",
-			body:         `{"model":"kilo-pro","input":"hi"}`,
+			body:         `{"model":"kilo/real/free","input":"hi"}`,
 			upstreamPath: "/responses",
 		},
 		{
@@ -141,8 +141,8 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 	if (*calls)[0].Body["model"] != "some/model" {
 		t.Fatalf("model should pass through unchanged: %#v", (*calls)[0].Body["model"])
 	}
-	if (*calls)[1].Body["model"] != "kilo-pro" {
-		t.Fatalf("model should pass through unchanged: %#v", (*calls)[1].Body["model"])
+	if (*calls)[1].Body["model"] != "real/free" {
+		t.Fatalf("kilo-prefixed model should be stripped before upstream: %#v", (*calls)[1].Body["model"])
 	}
 	if (*calls)[2].Body["model"] != "unknown-model" {
 		t.Fatalf("unknown model should pass through unchanged: %#v", (*calls)[2].Body["model"])
@@ -190,7 +190,7 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 }
 
-func TestModelsProxiesUpstreamListWithoutInjectingAliases(t *testing.T) {
+func TestModelsPrefixesUpstreamIDsForPublicListing(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
 
@@ -216,10 +216,11 @@ func TestModelsProxiesUpstreamListWithoutInjectingAliases(t *testing.T) {
 		t.Fatalf("decode models response: %v", err)
 	}
 
-	for _, model := range payload.Data {
-		if model.ID == "fake-alias" {
-			t.Fatalf("models response should not inject public aliases: %s", rec.Body.String())
-		}
+	if len(payload.Data) != 1 {
+		t.Fatalf("model count = %d, want 1: %s", len(payload.Data), rec.Body.String())
+	}
+	if payload.Data[0].ID != "kilo/real/free" {
+		t.Fatalf("public model id = %q, want kilo/real/free", payload.Data[0].ID)
 	}
 }
 
