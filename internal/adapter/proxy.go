@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -219,6 +220,28 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	defer resp.Body.Close()
 
 	copyResponseHeaders(w.Header(), resp.Header)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		responseBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream response read failed")
+			h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+				status:        http.StatusBadGateway,
+				upstreamError: readErr.Error(),
+			})
+			return
+		}
+		sanitized := sanitizeRateLimitModelLeak(body, responseBody)
+		w.Header().Del("Content-Length")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(sanitized)
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:      resp.StatusCode,
+			contentType: resp.Header.Get("Content-Type"),
+			body:        sanitized,
+		})
+		return
+	}
+
 	w.WriteHeader(resp.StatusCode)
 	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 	copyStreamingWithCapture(w, resp.Body, capture)
@@ -273,6 +296,27 @@ func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath s
 	if err != nil {
 		fmt.Printf("request_log_error=%v\n", err)
 	}
+}
+
+var rateLimitIdentifierPattern = regexp.MustCompile(`\blimit_[A-Za-z0-9_-]+(?:\\?/[A-Za-z0-9_.:-]+){2,4}\b`)
+
+func sanitizeRateLimitModelLeak(requestBody []byte, responseBody []byte) []byte {
+	model := strings.TrimSpace(extractModel(requestBody))
+	if model == "" || len(responseBody) == 0 {
+		return responseBody
+	}
+	sanitized := rateLimitIdentifierPattern.ReplaceAll(responseBody, []byte("<RATE_LIMIT_ID>"))
+	sanitized = bytes.ReplaceAll(sanitized, []byte(prefixPublicModel(model)), []byte("<UPSTREAM_MODEL>"))
+	sanitized = bytes.ReplaceAll(sanitized, []byte(model), []byte("<UPSTREAM_MODEL>"))
+	escapedModel := strings.ReplaceAll(model, "/", `\/`)
+	if escapedModel != model {
+		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedModel), []byte("<UPSTREAM_MODEL>"))
+	}
+	escapedPublicModel := strings.ReplaceAll(prefixPublicModel(model), "/", `\/`)
+	if escapedPublicModel != prefixPublicModel(model) {
+		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedPublicModel), []byte("<UPSTREAM_MODEL>"))
+	}
+	return sanitized
 }
 
 func validateJSONBody(body []byte) ([]byte, error) {

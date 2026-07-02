@@ -225,6 +225,80 @@ func TestModelsPrefixesUpstreamIDsForPublicListing(t *testing.T) {
 	}
 }
 
+func TestProxySanitizesRateLimitModelLeak(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded for poolside/laguna-xs.2:free via https://api.kilo.ai/path","code":429,"metadata":{"raw":"poolside/laguna-xs.2:free is temporarily rate-limited upstream","provider_name":"Poolside"}},"user_id":"org_2uwFc1szZKyZweUX7pX97kXQf2O"}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs.2:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "poolside/laguna-xs.2:free") {
+		t.Fatalf("rate-limit error leaked upstream model in body: %s", body)
+	}
+	if strings.Count(body, "<UPSTREAM_MODEL>") != 2 {
+		t.Fatalf("sanitized model marker count mismatch in body: %s", body)
+	}
+	for _, unchanged := range []string{"Poolside", "org_2uwFc1szZKyZweUX7pX97kXQf2O", "https://api.kilo.ai/path"} {
+		if !strings.Contains(body, unchanged) {
+			t.Fatalf("rate-limit sanitizer should not rewrite %q in body: %s", unchanged, body)
+		}
+	}
+}
+
+func TestProxySanitizesRateLimitIdentifierModelLeak(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded: limit_rpm/cohere/north-mini-code-20260617/d3a18412-b833-40de-bc07-c4ba9a1dea53. High demand for cohere/north-mini-code:free on OpenRouter - limited to 15 requests per minute.","code":429}}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/cohere/north-mini-code:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, leaked := range []string{"cohere/north-mini-code:free", "limit_rpm/cohere/north-mini-code-20260617/d3a18412-b833-40de-bc07-c4ba9a1dea53", "cohere/north-mini-code-20260617"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("rate-limit error leaked model identifier %q in body: %s", leaked, body)
+		}
+	}
+	for _, marker := range []string{"<RATE_LIMIT_ID>", "<UPSTREAM_MODEL>"} {
+		if !strings.Contains(body, marker) {
+			t.Fatalf("sanitized error missing marker %q in body: %s", marker, body)
+		}
+	}
+}
+
+func TestProxyDoesNotSanitizeModelLeakOutsideRateLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Bad request for poolside/laguna-xs.2:free","code":400}}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs.2:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "poolside/laguna-xs.2:free") {
+		t.Fatalf("non-rate-limit error should pass through unchanged: %s", rec.Body.String())
+	}
+}
+
 func TestCountTokensReturnsLocalAnthropicShape(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
