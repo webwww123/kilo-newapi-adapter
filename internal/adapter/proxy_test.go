@@ -229,18 +229,18 @@ func TestProxySanitizesRateLimitModelLeak(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded for poolside/laguna-xs.2:free via https://api.kilo.ai/path","code":429,"metadata":{"raw":"poolside/laguna-xs.2:free is temporarily rate-limited upstream","provider_name":"Poolside"}},"user_id":"org_2uwFc1szZKyZweUX7pX97kXQf2O"}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded for poolside/laguna-xs-2.1:free via https://api.kilo.ai/path","code":429,"metadata":{"raw":"poolside/laguna-xs-2.1:free is temporarily rate-limited upstream","provider_name":"Poolside"}},"user_id":"org_2uwFc1szZKyZweUX7pX97kXQf2O"}`))
 	}))
 	defer upstream.Close()
 
 	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs.2:free","messages":[{"role":"user","content":"hi"}]}`)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs-2.1:free","messages":[{"role":"user","content":"hi"}]}`)
 
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if strings.Contains(body, "poolside/laguna-xs.2:free") {
+	if strings.Contains(body, "poolside/laguna-xs-2.1:free") {
 		t.Fatalf("rate-limit error leaked upstream model in body: %s", body)
 	}
 	if strings.Count(body, "<UPSTREAM_MODEL>") != 2 {
@@ -284,17 +284,17 @@ func TestProxyDoesNotSanitizeModelLeakOutsideRateLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"Bad request for poolside/laguna-xs.2:free","code":400}}`))
+		_, _ = w.Write([]byte(`{"error":{"message":"Bad request for poolside/laguna-xs-2.1:free","code":400}}`))
 	}))
 	defer upstream.Close()
 
 	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs.2:free","messages":[{"role":"user","content":"hi"}]}`)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs-2.1:free","messages":[{"role":"user","content":"hi"}]}`)
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "poolside/laguna-xs.2:free") {
+	if !strings.Contains(rec.Body.String(), "poolside/laguna-xs-2.1:free") {
 		t.Fatalf("non-rate-limit error should pass through unchanged: %s", rec.Body.String())
 	}
 }
