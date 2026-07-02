@@ -8,6 +8,7 @@ Single-base adapter for putting Kilo's no-key gateway behind NewAPI while servin
 
 The adapter rewrites standard paths to Kilo gateway paths. Public model IDs are exposed with
 the `kilo/` prefix, and that prefix is stripped before forwarding requests to Kilo.
+For selected free models, it also trims oversized request context before forwarding.
 
 ## Default Mapping
 
@@ -57,6 +58,14 @@ REQUEST_LOG_BODY_LIMIT=1048576
 ```
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
+
+## Free Model Context Trimming
+
+Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
+
+The trim policy keeps system/developer items and the latest user item first, then backfills older conversation turns only while the model-specific input budget allows. If the latest user item alone is too large, its string content is trimmed from the middle while preserving the beginning and end.
+
+Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
 
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.

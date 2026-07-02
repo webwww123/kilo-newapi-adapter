@@ -3,6 +3,7 @@ package adapter
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -249,6 +250,101 @@ func TestCountTokensReturnsLocalAnthropicShape(t *testing.T) {
 	}
 }
 
+func TestFreeChatCompletionContextIsTrimmedBeforeForwarding(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	oldContent := "DROP_OLD_CONTEXT " + strings.Repeat("old ", 160000)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/stepfun/step-3.7-flash:free",
+		"messages":[
+			{"role":"system","content":"KEEP_SYSTEM"},
+			{"role":"user","content":"`+oldContent+`"},
+			{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
+			{"role":"user","content":"KEEP_LATEST_USER"}
+		],
+		"max_tokens":8192
+	}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("upstream calls = %d, want 1", len(*calls))
+	}
+	body := (*calls)[0].Body
+	if body["model"] != "stepfun/step-3.7-flash:free" {
+		t.Fatalf("model = %#v, want stripped free model", body["model"])
+	}
+	messages := body["messages"].([]any)
+	if !messagesContainText(messages, "KEEP_SYSTEM") {
+		t.Fatalf("trimmed messages dropped system message; len=%d", len(messages))
+	}
+	if !messagesContainText(messages, "KEEP_LATEST_USER") {
+		t.Fatalf("trimmed messages dropped latest user; len=%d", len(messages))
+	}
+	if messagesContainText(messages, "DROP_OLD_CONTEXT") {
+		t.Fatalf("trimmed messages kept old context; len=%d", len(messages))
+	}
+}
+
+func TestPaidChatCompletionContextIsNotTrimmed(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	oldContent := "KEEP_PAID_OLD_CONTEXT " + strings.Repeat("old ", 160000)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/deepseek/deepseek-v4-pro",
+		"messages":[
+			{"role":"user","content":"`+oldContent+`"},
+			{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
+			{"role":"user","content":"KEEP_PAID_LATEST"}
+		],
+		"max_tokens":8192
+	}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	messages := (*calls)[0].Body["messages"].([]any)
+	if !messagesContainText(messages, "KEEP_PAID_OLD_CONTEXT") {
+		t.Fatalf("paid model context was unexpectedly trimmed; len=%d", len(messages))
+	}
+}
+
+func TestFreeResponsesContextIsTrimmedBeforeForwarding(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/responses", `{
+		"model":"kilo/stepfun/step-3.7-flash:free",
+		"input":[
+			{"role":"system","content":"KEEP_RESPONSE_SYSTEM"},
+			{"role":"user","content":"DROP_RESPONSE_OLD `+strings.Repeat("old ", 160000)+`"},
+			{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
+			{"role":"user","content":"KEEP_RESPONSE_LATEST"}
+		],
+		"max_output_tokens":8192
+	}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	input := (*calls)[0].Body["input"].([]any)
+	if !messagesContainText(input, "KEEP_RESPONSE_SYSTEM") {
+		t.Fatalf("trimmed input dropped system item; len=%d", len(input))
+	}
+	if !messagesContainText(input, "KEEP_RESPONSE_LATEST") {
+		t.Fatalf("trimmed input dropped latest user item; len=%d", len(input))
+	}
+	if messagesContainText(input, "DROP_RESPONSE_OLD") {
+		t.Fatalf("trimmed input kept old response context; len=%d", len(input))
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	handler := newTestHandler("http://127.0.0.1:1")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -262,4 +358,13 @@ func TestHealthz(t *testing.T) {
 	if strings.TrimSpace(rec.Body.String()) != "ok" {
 		t.Fatalf("health body = %q", rec.Body.String())
 	}
+}
+
+func messagesContainText(messages []any, text string) bool {
+	for _, item := range messages {
+		if strings.Contains(fmt.Sprint(item), text) {
+			return true
+		}
+	}
+	return false
 }

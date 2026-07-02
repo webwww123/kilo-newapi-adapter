@@ -193,6 +193,20 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
+	body, trimStats, err := trimFreeModelContext(body, upstreamPath)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+	if trimStats.changed() {
+		fmt.Printf("kilo_context_trim path=%s model=%s trimmed_items=%d truncated_items=%d output_clamped=%t\n",
+			upstreamPath, trimStats.Model, trimStats.TrimmedItems, trimStats.TruncatedItems, trimStats.OutputClamped)
+	}
+
 	resp, err := h.forward(r, upstreamPath, bytes.NewReader(body))
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
