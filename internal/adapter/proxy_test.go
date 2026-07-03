@@ -452,6 +452,38 @@ func TestNvidiaSuperFreeUsesActual262KContextLimit(t *testing.T) {
 	}
 }
 
+func TestPoolsideXS21TruncatesOversizedLatestContentParts(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/poolside/laguna-xs-2.1:free",
+		"messages":[
+			{"role":"system","content":"KEEP_POOL_SYSTEM"},
+			{"role":"user","content":[
+				{"type":"text","text":"KEEP_POOL_HEAD `+strings.Repeat("middle ", 450000)+` KEEP_POOL_TAIL"}
+			]}
+		],
+		"tools":[{"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],
+		"max_tokens":64000
+	}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	messages := (*calls)[0].Body["messages"].([]any)
+	if !messagesContainText(messages, "KEEP_POOL_SYSTEM") {
+		t.Fatalf("trimmed messages dropped system message; len=%d", len(messages))
+	}
+	if !messagesContainText(messages, "KEEP_POOL_HEAD") || !messagesContainText(messages, "KEEP_POOL_TAIL") {
+		t.Fatalf("trimmed latest content did not preserve edges; len=%d", len(messages))
+	}
+	if tokens := contextEstimateItemsTokens(messages); tokens > 160000 {
+		t.Fatalf("estimated messages tokens = %d, want under xs2.1 budget", tokens)
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	handler := newTestHandler("http://127.0.0.1:1")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)

@@ -412,16 +412,80 @@ func truncateLatestUserContextItem(items []any, budget int, stats *contextTrimSt
 	if !ok {
 		return items
 	}
-	content, ok := message["content"].(string)
+	content, ok := message["content"]
 	if !ok {
 		return items
 	}
-	if contextEstimateStringTokens(content) <= remaining {
+	trimmed, changed := trimContextContentToBudget(content, remaining)
+	if !changed {
 		return items
 	}
-	message["content"] = trimStringPreservingEdgesToContextBudget(content, remaining)
+	message["content"] = trimmed
 	stats.TruncatedItems++
 	return items
+}
+
+func trimContextContentToBudget(value any, budget int) (any, bool) {
+	if budget <= 0 {
+		return "", true
+	}
+	if contextEstimateAnyTokens(value) <= budget {
+		return value, false
+	}
+
+	switch typed := value.(type) {
+	case string:
+		return trimStringPreservingEdgesToContextBudget(typed, budget), true
+	case []any:
+		out := append([]any{}, typed...)
+		for i := len(out) - 1; i >= 0; i-- {
+			withoutItemCost := contextEstimateAnyTokens(out) - contextEstimateAnyTokens(out[i])
+			itemBudget := budget - withoutItemCost - 1
+			if itemBudget < 64 {
+				itemBudget = 64
+			}
+			trimmed, changed := trimContextContentToBudget(out[i], itemBudget)
+			if !changed {
+				continue
+			}
+			out[i] = trimmed
+			return out, true
+		}
+		return trimJSONishToContextBudget(out, budget), true
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = item
+		}
+		for _, key := range []string{"text", "content", "input", "output"} {
+			raw, exists := out[key]
+			if !exists {
+				continue
+			}
+			withoutValueCost := contextEstimateAnyTokens(out) - contextEstimateAnyTokens(raw)
+			valueBudget := budget - withoutValueCost - 1
+			if valueBudget < 64 {
+				valueBudget = 64
+			}
+			trimmed, changed := trimContextContentToBudget(raw, valueBudget)
+			if !changed {
+				continue
+			}
+			out[key] = trimmed
+			return out, true
+		}
+		return trimJSONishToContextBudget(out, budget), true
+	default:
+		return trimJSONishToContextBudget(value, budget), true
+	}
+}
+
+func trimJSONishToContextBudget(value any, budget int) string {
+	data, err := json.Marshal(value)
+	if err != nil {
+		data = []byte(fmt.Sprint(value))
+	}
+	return trimStringPreservingEdgesToContextBudget(string(data), budget)
 }
 
 func contextEstimateItemsTokens(items []any) int {
