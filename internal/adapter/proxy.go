@@ -138,7 +138,11 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start tim
 		})
 		return
 	}
-	body = prefixModelsResponse(body)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body = prefixModelsResponse(body)
+	} else {
+		body = redactProviderName(body)
+	}
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
@@ -231,6 +235,28 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			return
 		}
 		sanitized := sanitizeRateLimitModelLeak(body, responseBody)
+		sanitized = redactProviderName(sanitized)
+		w.Header().Del("Content-Length")
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(sanitized)
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:      resp.StatusCode,
+			contentType: resp.Header.Get("Content-Type"),
+			body:        sanitized,
+		})
+		return
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream response read failed")
+			h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+				status:        http.StatusBadGateway,
+				upstreamError: readErr.Error(),
+			})
+			return
+		}
+		sanitized := redactProviderName(responseBody)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(sanitized)
@@ -298,7 +324,11 @@ func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath s
 	}
 }
 
-var rateLimitIdentifierPattern = regexp.MustCompile(`\blimit_[A-Za-z0-9_-]+(?:\\?/[A-Za-z0-9_.:-]+){2,4}\b`)
+var (
+	rateLimitIdentifierPattern      = regexp.MustCompile(`\blimit_[A-Za-z0-9_-]+(?:\\?/[A-Za-z0-9_.:-]+){2,4}\b`)
+	providerNameFieldPattern        = regexp.MustCompile(`("provider_name"\s*:\s*")[^"]*(")`)
+	escapedProviderNameFieldPattern = regexp.MustCompile(`(\\"provider_name\\"\s*:\s*\\")[^\\"\\\\]*(\\")`)
+)
 
 func sanitizeRateLimitModelLeak(requestBody []byte, responseBody []byte) []byte {
 	model := strings.TrimSpace(extractModel(requestBody))
@@ -317,6 +347,12 @@ func sanitizeRateLimitModelLeak(requestBody []byte, responseBody []byte) []byte 
 		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedPublicModel), []byte("<UPSTREAM_MODEL>"))
 	}
 	return sanitized
+}
+
+func redactProviderName(body []byte) []byte {
+	redacted := providerNameFieldPattern.ReplaceAll(body, []byte(`${1}<redacted>${2}`))
+	redacted = escapedProviderNameFieldPattern.ReplaceAll(redacted, []byte(`${1}<redacted>${2}`))
+	return redacted
 }
 
 func validateJSONBody(body []byte) ([]byte, error) {

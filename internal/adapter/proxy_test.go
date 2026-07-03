@@ -246,10 +246,39 @@ func TestProxySanitizesRateLimitModelLeak(t *testing.T) {
 	if strings.Count(body, "<UPSTREAM_MODEL>") != 2 {
 		t.Fatalf("sanitized model marker count mismatch in body: %s", body)
 	}
-	for _, unchanged := range []string{"Poolside", "org_2uwFc1szZKyZweUX7pX97kXQf2O", "https://api.kilo.ai/path"} {
+	if strings.Contains(body, "Poolside") {
+		t.Fatalf("rate-limit error leaked provider_name in body: %s", body)
+	}
+	if !strings.Contains(body, `"provider_name":"<redacted>"`) {
+		t.Fatalf("provider_name was not redacted: %s", body)
+	}
+	for _, unchanged := range []string{"org_2uwFc1szZKyZweUX7pX97kXQf2O", "https://api.kilo.ai/path"} {
 		if !strings.Contains(body, unchanged) {
 			t.Fatalf("rate-limit sanitizer should not rewrite %q in body: %s", unchanged, body)
 		}
+	}
+}
+
+func TestProxyRedactsProviderNameInUpstreamErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error ({\"raw\":\"{\\\"error\\\":{\\\"message\\\":\\\"Unrecognized chat message.\\\",\\\"type\\\":\\\"request_params_invalid\\\"}}\",\"provider_name\":\"StepFun\",\"is_byok\":true})","type":"request_params_invalid"},"provider_name":"StepFun"}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "StepFun") {
+		t.Fatalf("provider_name leaked in response body: %s", body)
+	}
+	if !strings.Contains(body, `"provider_name":"<redacted>"`) {
+		t.Fatalf("provider_name was not redacted: %s", body)
 	}
 }
 
