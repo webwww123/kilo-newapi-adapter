@@ -419,6 +419,39 @@ func TestFreeResponsesContextIsTrimmedBeforeForwarding(t *testing.T) {
 	}
 }
 
+func TestNvidiaSuperFreeUsesActual262KContextLimit(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	oldContent := "DROP_NVIDIA_SUPER_OLD " + strings.Repeat("old ", 160000)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/nvidia/nemotron-3-super-120b-a12b:free",
+		"messages":[
+			{"role":"system","content":"KEEP_NVIDIA_SUPER_SYSTEM"},
+			{"role":"user","content":"`+oldContent+`"},
+			{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
+			{"role":"user","content":"KEEP_NVIDIA_SUPER_LATEST"}
+		],
+		"tools":[{"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],
+		"max_tokens":64000
+	}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	messages := (*calls)[0].Body["messages"].([]any)
+	if !messagesContainText(messages, "KEEP_NVIDIA_SUPER_SYSTEM") {
+		t.Fatalf("trimmed messages dropped system message; len=%d", len(messages))
+	}
+	if !messagesContainText(messages, "KEEP_NVIDIA_SUPER_LATEST") {
+		t.Fatalf("trimmed messages dropped latest user; len=%d", len(messages))
+	}
+	if messagesContainText(messages, "DROP_NVIDIA_SUPER_OLD") {
+		t.Fatalf("trimmed messages kept old nvidia super context; len=%d", len(messages))
+	}
+}
+
 func TestHealthz(t *testing.T) {
 	handler := newTestHandler("http://127.0.0.1:1")
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)

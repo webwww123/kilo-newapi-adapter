@@ -36,7 +36,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"nvidia/nemotron-3-ultra-550b-a55b:free":             {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000},
 	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {ContextLimit: 256000, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"poolside/laguna-xs-2.1:free":                        {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
-	"nvidia/nemotron-3-super-120b-a12b:free":             {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000},
+	"nvidia/nemotron-3-super-120b-a12b:free":             {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"openrouter/free":                                    {ContextLimit: 200000, SafetyMargin: 40000, MaxInputTokens: 150000},
 }
 
