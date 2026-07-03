@@ -308,6 +308,34 @@ func TestProxyRedactsUpstreamModelInNonRateLimitErrors(t *testing.T) {
 	}
 }
 
+func TestProxyNormalizesSignInModelErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"You need to sign in to use this model.","code":401,"metadata":{"provider_name":"OpenAI","model":"openai/gpt-4.1:free"}}}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/openai/gpt-4.1:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"message":"此模型正在维护很快恢复"`) {
+		t.Fatalf("sign-in model error message was not normalized: %s", body)
+	}
+	if !strings.Contains(body, `"code":104`) {
+		t.Fatalf("sign-in model error code was not normalized: %s", body)
+	}
+	for _, leaked := range []string{"You need to sign in to use this model.", "openai/gpt-4.1:free", "kilo/openai/gpt-4.1:free", "OpenAI"} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("sign-in model error leaked %q in body: %s", leaked, body)
+		}
+	}
+}
+
 func TestProxySanitizesRateLimitIdentifierModelLeak(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

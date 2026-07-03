@@ -13,7 +13,11 @@ import (
 	"unicode/utf8"
 )
 
-const publicModelPrefix = "kilo/"
+const (
+	publicModelPrefix            = "kilo/"
+	signInModelErrorMessage      = "You need to sign in to use this model."
+	modelMaintenanceErrorMessage = "此模型正在维护很快恢复"
+)
 
 type Handler struct {
 	cfg    Config
@@ -234,8 +238,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			})
 			return
 		}
-		sanitized := sanitizeRateLimitModelLeak(body, responseBody)
-		sanitized = redactProviderName(sanitized)
+		sanitized := sanitizeUpstreamErrorBody(body, responseBody)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(sanitized)
@@ -256,8 +259,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			})
 			return
 		}
-		sanitized := sanitizeRateLimitModelLeak(body, responseBody)
-		sanitized = redactProviderName(sanitized)
+		sanitized := sanitizeUpstreamErrorBody(body, responseBody)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(sanitized)
@@ -348,6 +350,19 @@ func sanitizeRateLimitModelLeak(requestBody []byte, responseBody []byte) []byte 
 		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedPublicModel), []byte("<UPSTREAM_MODEL>"))
 	}
 	return sanitized
+}
+
+func sanitizeUpstreamErrorBody(requestBody []byte, responseBody []byte) []byte {
+	sanitized := sanitizeRateLimitModelLeak(requestBody, responseBody)
+	sanitized = redactProviderName(sanitized)
+	return normalizeSignInModelError(sanitized)
+}
+
+func normalizeSignInModelError(body []byte) []byte {
+	if !bytes.Contains(body, []byte(signInModelErrorMessage)) {
+		return body
+	}
+	return []byte(`{"error":{"message":"` + modelMaintenanceErrorMessage + `","type":"model_maintenance","code":104}}`)
 }
 
 func redactProviderName(body []byte) []byte {
