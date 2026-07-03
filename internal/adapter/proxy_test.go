@@ -282,6 +282,32 @@ func TestProxyRedactsProviderNameInUpstreamErrors(t *testing.T) {
 	}
 }
 
+func TestProxyRedactsUpstreamModelInNonRateLimitErrors(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"nvidia/nemotron-3-super-120b-a12b:free is not a valid model ID","code":400}}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "nvidia/nemotron-3-super-120b-a12b:free") {
+		t.Fatalf("non-rate-limit error leaked upstream model in body: %s", body)
+	}
+	if strings.Contains(body, "kilo/nvidia/nemotron-3-super-120b-a12b:free") {
+		t.Fatalf("non-rate-limit error leaked public model in body: %s", body)
+	}
+	if !strings.Contains(body, "<UPSTREAM_MODEL> is not a valid model ID") {
+		t.Fatalf("non-rate-limit error did not redact model marker: %s", body)
+	}
+}
+
 func TestProxySanitizesRateLimitIdentifierModelLeak(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -309,7 +335,7 @@ func TestProxySanitizesRateLimitIdentifierModelLeak(t *testing.T) {
 	}
 }
 
-func TestProxyDoesNotSanitizeModelLeakOutsideRateLimit(t *testing.T) {
+func TestProxySanitizesModelLeakOutsideRateLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -323,8 +349,12 @@ func TestProxyDoesNotSanitizeModelLeakOutsideRateLimit(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "poolside/laguna-xs-2.1:free") {
-		t.Fatalf("non-rate-limit error should pass through unchanged: %s", rec.Body.String())
+	body := rec.Body.String()
+	if strings.Contains(body, "poolside/laguna-xs-2.1:free") {
+		t.Fatalf("non-rate-limit error leaked upstream model in body: %s", body)
+	}
+	if !strings.Contains(body, "Bad request for <UPSTREAM_MODEL>") {
+		t.Fatalf("non-rate-limit error did not redact model marker: %s", body)
 	}
 }
 

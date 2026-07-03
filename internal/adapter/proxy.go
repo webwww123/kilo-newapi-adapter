@@ -256,7 +256,8 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			})
 			return
 		}
-		sanitized := redactProviderName(responseBody)
+		sanitized := sanitizeRateLimitModelLeak(body, responseBody)
+		sanitized = redactProviderName(sanitized)
 		w.Header().Del("Content-Length")
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(sanitized)
