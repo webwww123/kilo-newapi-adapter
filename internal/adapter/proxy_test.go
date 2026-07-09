@@ -225,6 +225,66 @@ func TestModelsPrefixesUpstreamIDsForPublicListing(t *testing.T) {
 	}
 }
 
+func TestModelsPrefixesNestedModelReferencesForPublicListing(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"object":"list",
+			"data":[{
+				"id":"kilo-auto/free",
+				"canonical_slug":"stepfun/step-3.7-flash:free",
+				"autoRouting":{"models":["stepfun/step-3.7-flash:free","tencent/hy3:free","kilo/already-prefixed"]}
+			}]
+		}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, leaked := range []string{`"canonical_slug":"stepfun/step-3.7-flash:free"`, `"stepfun/step-3.7-flash:free"`, `"tencent/hy3:free"`} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("models response leaked unprefixed model reference %q in body: %s", leaked, body)
+		}
+	}
+	for _, expected := range []string{`"canonical_slug":"kilo/stepfun/step-3.7-flash:free"`, `"kilo/stepfun/step-3.7-flash:free"`, `"kilo/tencent/hy3:free"`, `"kilo/already-prefixed"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("models response missing prefixed model reference %q in body: %s", expected, body)
+		}
+	}
+}
+
+func TestProxyPrefixesSuccessResponseModelAndRemovesProvider(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","model":"tencent/hy3-20260706:free","provider":"Novita","choices":[{"message":{"role":"assistant","content":"OK"}}]}`))
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/tencent/hy3:free","messages":[{"role":"user","content":"hi"}]}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, leaked := range []string{"tencent/hy3-20260706:free", `"provider":"Novita"`} {
+		if strings.Contains(body, leaked) {
+			t.Fatalf("success response leaked upstream detail %q in body: %s", leaked, body)
+		}
+	}
+	if !strings.Contains(body, `"model":"kilo/tencent/hy3:free"`) {
+		t.Fatalf("success response did not return public request model: %s", body)
+	}
+}
+
 func TestProxySanitizesRateLimitModelLeak(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

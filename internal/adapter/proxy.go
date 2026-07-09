@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -191,6 +192,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		})
 		return
 	}
+	publicRequestModel := prefixPublicModelIfSet(extractModel(body))
 
 	body, err = stripPublicModelPrefix(body)
 	if err != nil {
@@ -271,9 +273,20 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	w.WriteHeader(resp.StatusCode)
 	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
-	copyStreamingWithCapture(w, resp.Body, capture)
+	w.Header().Del("Content-Length")
+	w.WriteHeader(resp.StatusCode)
+	if isEventStreamResponse(resp.Header) {
+		copyEventStreamWithNormalizeAndCapture(w, resp.Body, capture, publicRequestModel)
+	} else {
+		responseBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			fmt.Printf("upstream_success_read_error=%v\n", readErr)
+			return
+		}
+		responseBody = normalizeSuccessResponseBody(responseBody, publicRequestModel)
+		_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
+	}
 	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
 		status:        resp.StatusCode,
 		bytesWritten:  capture.Total(),
@@ -422,10 +435,31 @@ func prefixModelsData(value any) {
 	case []any:
 		for _, item := range typed {
 			if model, ok := item.(map[string]any); ok {
-				if raw, ok := model["id"].(string); ok {
-					model["id"] = prefixPublicModel(raw)
-				}
+				prefixModelListObject(model)
 			}
+		}
+	}
+}
+
+func prefixModelListObject(model map[string]any) {
+	for _, key := range []string{"id", "canonical_slug"} {
+		if raw, ok := model[key].(string); ok {
+			model[key] = prefixPublicModel(raw)
+		}
+	}
+	if autoRouting, ok := model["autoRouting"].(map[string]any); ok {
+		prefixStringArrayField(autoRouting, "models")
+	}
+}
+
+func prefixStringArrayField(object map[string]any, key string) {
+	values, ok := object[key].([]any)
+	if !ok {
+		return
+	}
+	for i, value := range values {
+		if raw, ok := value.(string); ok {
+			values[i] = prefixPublicModel(raw)
 		}
 	}
 }
@@ -435,6 +469,100 @@ func prefixPublicModel(model string) string {
 		return model
 	}
 	return publicModelPrefix + model
+}
+
+func prefixPublicModelIfSet(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ""
+	}
+	return prefixPublicModel(model)
+}
+
+func normalizeSuccessResponseBody(body []byte, publicModel string) []byte {
+	var payload any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	normalizeSuccessPayload(payload, publicModel)
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func normalizeSuccessPayload(value any, publicModel string) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			switch key {
+			case "model":
+				if raw, ok := item.(string); ok {
+					typed[key] = normalizeSuccessModel(raw, publicModel)
+					continue
+				}
+			case "provider", "provider_name":
+				delete(typed, key)
+				continue
+			}
+			normalizeSuccessPayload(item, publicModel)
+		}
+	case []any:
+		for _, item := range typed {
+			normalizeSuccessPayload(item, publicModel)
+		}
+	}
+}
+
+func normalizeSuccessModel(upstreamModel string, publicModel string) string {
+	if publicModel != "" {
+		return publicModel
+	}
+	return prefixPublicModel(upstreamModel)
+}
+
+func isEventStreamResponse(header http.Header) bool {
+	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/event-stream")
+}
+
+func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string) {
+	flusher, _ := w.(http.Flusher)
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			chunk := normalizeEventStreamLine(line, publicModel)
+			if capture != nil {
+				_, _ = capture.Write(chunk)
+			}
+			_, _ = w.Write(chunk)
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func normalizeEventStreamLine(line []byte, publicModel string) []byte {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	lineEnding := line[len(trimmed):]
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return line
+	}
+	data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
+		return line
+	}
+	normalized := normalizeSuccessResponseBody(data, publicModel)
+	output := make([]byte, 0, len("data: ")+len(normalized)+len(lineEnding))
+	output = append(output, "data: "...)
+	output = append(output, normalized...)
+	output = append(output, lineEnding...)
+	return output
 }
 
 func (h *Handler) forward(original *http.Request, upstreamPath string, body io.Reader) (*http.Response, error) {
