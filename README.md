@@ -63,7 +63,7 @@ REQUEST_LOG_BODY_LIMIT=1048576
 
 Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
 
-The trim policy keeps system/developer items and the latest user item first, then backfills older conversation turns only while the model-specific input budget allows. If the latest user item alone is too large, its string content is trimmed from the middle while preserving the beginning and end.
+The trim policy keeps system/developer items, the originating user request, and the newest completed tool turn first. OpenAI `assistant.tool_calls` plus `tool` results, Anthropic `tool_use` plus `tool_result` blocks, and Responses `function_call` plus `function_call_output` items are retained atomically. Oversized newest tool results are truncated while preserving both edges before older conversation turns are considered. If the required current tool structure still cannot fit, the adapter leaves the original request history intact so the upstream can return an explicit context error instead of receiving stale partial history.
 
 Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
 

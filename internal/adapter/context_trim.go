@@ -100,9 +100,12 @@ func trimResponsePayload(payload map[string]any, profile contextTrimProfile, sta
 		return
 	}
 	available := contextInputBudget(payload, profile, true, stats)
+	if contextResponsesHasExternalState(payload) {
+		return
+	}
 	available -= contextEstimateAnyTokens(payload["instructions"])
 	if available < 64 {
-		available = 64
+		return
 	}
 	if contextEstimateStringTokens(input) <= available {
 		return
@@ -119,25 +122,47 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	available := contextInputBudget(payload, profile, responses, stats)
 	if responses {
 		available -= contextEstimateAnyTokens(payload["instructions"])
+		if contextResponsesHasExternalState(payload) || !contextResponsesItemsSafeToTrim(items) {
+			return
+		}
 	} else {
 		available -= contextEstimateAnyTokens(payload["system"])
 	}
+	if !contextToolHistorySafeToTrim(items) {
+		return
+	}
 	if available < 512 {
-		available = 512
+		// Fixed request fields already consume the useful context budget. Keep
+		// the original history so the upstream returns an explicit context error
+		// instead of receiving a stale, partially trimmed tool transcript.
+		return
 	}
 
 	if contextEstimateItemsTokens(items) <= available {
 		return
 	}
 
-	kept := selectContextItemsForBudget(items, available)
+	workingItems, ok := cloneContextJSONValue(items).([]any)
+	if !ok {
+		return
+	}
+	var trimStats contextTrimStats
+	kept := selectContextItemsForBudget(workingItems, available)
 	if contextEstimateItemsTokens(kept) > available {
-		kept = truncateLatestUserContextItem(kept, available, stats)
+		kept = truncateNewestContextToolResultsForBudget(kept, available, &trimStats)
+	}
+	if contextEstimateItemsTokens(kept) > available {
+		kept = truncateLatestOrdinaryUserContextItem(kept, available, &trimStats)
+	}
+	if contextEstimateItemsTokens(kept) > available {
+		return
 	}
 	if len(kept) < len(items) {
-		stats.TrimmedItems += len(items) - len(kept)
+		trimStats.TrimmedItems += len(items) - len(kept)
 	}
 	payload[field] = kept
+	stats.TrimmedItems += trimStats.TrimmedItems
+	stats.TruncatedItems += trimStats.TruncatedItems
 }
 
 func contextInputBudget(payload map[string]any, profile contextTrimProfile, responses bool, stats *contextTrimStats) int {
@@ -165,9 +190,6 @@ func contextInputBudget(payload map[string]any, profile contextTrimProfile, resp
 	available := limit - outputBudget - contextEstimateAnyTokens(payload["tools"]) - contextTrimOverheadTokens - profile.SafetyMargin
 	if profile.MaxInputTokens > 0 && available > profile.MaxInputTokens {
 		available = profile.MaxInputTokens
-	}
-	if available < 512 {
-		available = 512
 	}
 	return available
 }
@@ -245,6 +267,16 @@ func selectContextItemsForBudget(items []any, budget int) []any {
 		addGroup(contextItemGroup{indexes: []int{i}}, len(selected) == 1)
 	}
 
+	forcedNewestToolGroup := false
+	for _, group := range completedContextToolGroupsBefore(items, len(items)) {
+		if !isCurrentContextToolGroup(items, group, latestUserIndex) {
+			continue
+		}
+		if addGroup(group, !forcedNewestToolGroup) {
+			forcedNewestToolGroup = true
+		}
+	}
+
 	for _, group := range completedContextToolGroupsBefore(items, latestUserIndex) {
 		addGroup(group, false)
 	}
@@ -254,7 +286,7 @@ func selectContextItemsForBudget(items []any, budget int) []any {
 			continue
 		}
 		role := contextItemRole(items[i])
-		if role == "system" || role == "developer" || role == "tool" {
+		if role == "system" || role == "developer" {
 			continue
 		}
 		if contextItemHasToolCall(items[i]) {
@@ -270,12 +302,23 @@ func selectContextItemsForBudget(items []any, budget int) []any {
 					continue
 				}
 				if previousRole == "user" {
+					previous, _ := items[j].(map[string]any)
+					if len(contextAnthropicToolResultIDSet(previous)) > 0 {
+						continue
+					}
 					group.indexes = []int{j, i}
 					foundUser = true
 					break
 				}
 			}
 			if !foundUser {
+				continue
+			}
+		} else if role == "tool" {
+			continue
+		} else if role == "user" {
+			message, _ := items[i].(map[string]any)
+			if len(contextAnthropicToolResultIDSet(message)) > 0 {
 				continue
 			}
 		}
@@ -294,19 +337,277 @@ func selectContextItemsForBudget(items []any, budget int) []any {
 	return out
 }
 
+func isCurrentContextToolGroup(items []any, group contextItemGroup, latestUserIndex int) bool {
+	newest := newestContextGroupIndex(group)
+	if newest >= latestUserIndex {
+		return true
+	}
+	return latestUserIndex == len(items)-1 &&
+		newest == latestUserIndex-1 &&
+		isBlankContextUserItem(items[latestUserIndex])
+}
+
+func newestContextGroupIndex(group contextItemGroup) int {
+	newest := -1
+	for _, index := range group.indexes {
+		if index > newest {
+			newest = index
+		}
+	}
+	return newest
+}
+
+func isBlankContextUserItem(item any) bool {
+	message, ok := item.(map[string]any)
+	if !ok || contextItemRole(message) != "user" {
+		return false
+	}
+	switch content := message["content"].(type) {
+	case nil:
+		return true
+	case string:
+		return strings.TrimSpace(content) == ""
+	case []any:
+		return len(content) == 0
+	default:
+		return false
+	}
+}
+
+func contextResponsesItemsSafeToTrim(items []any) bool {
+	callIndexes := make(map[string]int)
+	outputIndexes := make(map[string]int)
+	for index, item := range items {
+		message, ok := item.(map[string]any)
+		if !ok {
+			return false
+		}
+		typeName, _ := message["type"].(string)
+		typeName = strings.TrimSpace(typeName)
+		switch typeName {
+		case "function_call":
+			ids := contextToolCallIDSet(message)
+			if len(ids) != 1 {
+				return false
+			}
+			for id := range ids {
+				if _, exists := callIndexes[id]; exists {
+					return false
+				}
+				callIndexes[id] = index
+			}
+			continue
+		case "function_call_output":
+			id := contextToolResultID(message)
+			if id == "" {
+				return false
+			}
+			if _, exists := outputIndexes[id]; exists {
+				return false
+			}
+			outputIndexes[id] = index
+			continue
+		case "", "message":
+			if contextItemRole(message) != "" {
+				continue
+			}
+			return false
+		default:
+			return false
+		}
+	}
+	if len(callIndexes) != len(outputIndexes) {
+		return false
+	}
+	for id, callIndex := range callIndexes {
+		outputIndex, ok := outputIndexes[id]
+		if !ok || outputIndex <= callIndex {
+			return false
+		}
+	}
+	return true
+}
+
+func contextResponsesHasExternalState(payload map[string]any) bool {
+	for _, key := range []string{"previous_response_id", "conversation"} {
+		value, exists := payload[key]
+		if !exists || value == nil {
+			continue
+		}
+		if text, ok := value.(string); ok && strings.TrimSpace(text) == "" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func contextToolHistorySafeToTrim(items []any) bool {
+	openAICallIndexes := make(map[string]int)
+	openAIResultIndexes := make(map[string]int)
+	anthropicCallIndexes := make(map[string]int)
+	anthropicResultIndexes := make(map[string]int)
+
+	for index, item := range items {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if _, exists := message["function_call"]; exists {
+			return false
+		}
+		if contextItemRole(message) == "function" {
+			return false
+		}
+
+		rawOpenAICalls := 0
+		if strings.TrimSpace(fmt.Sprint(message["type"])) == "function_call" {
+			rawOpenAICalls = 1
+		} else if toolCalls, ok := message["tool_calls"].([]any); ok {
+			rawOpenAICalls = len(toolCalls)
+		}
+		openAIIDs := contextToolCallIDSet(message)
+		if rawOpenAICalls != len(openAIIDs) {
+			return false
+		}
+		for id := range openAIIDs {
+			if _, exists := openAICallIndexes[id]; exists {
+				return false
+			}
+			openAICallIndexes[id] = index
+		}
+
+		if contextItemRole(message) == "tool" {
+			id := contextToolResultID(message)
+			if id == "" {
+				return false
+			}
+			if _, exists := openAIResultIndexes[id]; exists {
+				return false
+			}
+			openAIResultIndexes[id] = index
+		}
+
+		rawAnthropicCalls := 0
+		rawAnthropicResults := 0
+		if blocks, ok := message["content"].([]any); ok {
+			for _, rawBlock := range blocks {
+				block, ok := rawBlock.(map[string]any)
+				if !ok {
+					continue
+				}
+				switch strings.TrimSpace(fmt.Sprint(block["type"])) {
+				case "tool_use":
+					rawAnthropicCalls++
+				case "tool_result":
+					rawAnthropicResults++
+				}
+			}
+		}
+		anthropicCallIDs := contextAnthropicToolUseIDSet(message)
+		anthropicResultIDs := contextAnthropicToolResultIDSet(message)
+		if rawAnthropicCalls != len(anthropicCallIDs) || rawAnthropicResults != len(anthropicResultIDs) {
+			return false
+		}
+		for id := range anthropicCallIDs {
+			if _, exists := anthropicCallIndexes[id]; exists {
+				return false
+			}
+			anthropicCallIndexes[id] = index
+		}
+		for id := range anthropicResultIDs {
+			if _, exists := anthropicResultIndexes[id]; exists {
+				return false
+			}
+			anthropicResultIndexes[id] = index
+		}
+	}
+
+	if !contextToolPairIndexesMatch(openAICallIndexes, openAIResultIndexes) {
+		return false
+	}
+	if !contextToolPairIndexesMatch(anthropicCallIndexes, anthropicResultIndexes) {
+		return false
+	}
+
+	covered := make(map[int]struct{})
+	for _, group := range completedContextToolGroupsBefore(items, len(items)) {
+		for _, index := range group.indexes {
+			covered[index] = struct{}{}
+		}
+	}
+	for index, item := range items {
+		message, _ := item.(map[string]any)
+		isToolHistory := contextItemHasToolCall(item) ||
+			contextItemRole(item) == "tool" ||
+			len(contextAnthropicToolResultIDSet(message)) > 0
+		if !isToolHistory {
+			continue
+		}
+		if _, ok := covered[index]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func contextToolPairIndexesMatch(callIndexes, resultIndexes map[string]int) bool {
+	if len(callIndexes) != len(resultIndexes) {
+		return false
+	}
+	for id, callIndex := range callIndexes {
+		resultIndex, ok := resultIndexes[id]
+		if !ok || resultIndex <= callIndex {
+			return false
+		}
+	}
+	return true
+}
+
 func completedContextToolGroupsBefore(items []any, endExclusive int) []contextItemGroup {
+	groups := completedOpenAIContextToolGroupsBefore(items, endExclusive)
+	groups = append(groups, completedAnthropicContextToolGroupsBefore(items, endExclusive)...)
+	sort.SliceStable(groups, func(i, j int) bool {
+		return newestContextGroupIndex(groups[i]) > newestContextGroupIndex(groups[j])
+	})
+	return groups
+}
+
+func completedOpenAIContextToolGroupsBefore(items []any, endExclusive int) []contextItemGroup {
 	if endExclusive > len(items) {
 		endExclusive = len(items)
 	}
 	groups := make([]contextItemGroup, 0)
 	for i := 0; i < endExclusive; i++ {
+		message, _ := items[i].(map[string]any)
+		isResponsesCall := strings.TrimSpace(fmt.Sprint(message["type"])) == "function_call"
+		if isResponsesCall && i > 0 {
+			previous, _ := items[i-1].(map[string]any)
+			if strings.TrimSpace(fmt.Sprint(previous["type"])) == "function_call" {
+				continue
+			}
+		}
 		callIDs := contextToolCallIDSet(items[i])
 		if len(callIDs) == 0 {
 			continue
 		}
 		indexes := []int{i}
+		resultStart := i + 1
+		if isResponsesCall {
+			for j := i + 1; j < endExclusive; j++ {
+				callItem, _ := items[j].(map[string]any)
+				if strings.TrimSpace(fmt.Sprint(callItem["type"])) != "function_call" {
+					break
+				}
+				for id := range contextToolCallIDSet(callItem) {
+					callIDs[id] = struct{}{}
+				}
+				indexes = append(indexes, j)
+				resultStart = j + 1
+			}
+		}
 		matched := map[string]struct{}{}
-		for j := i + 1; j < endExclusive; j++ {
+		for j := resultStart; j < endExclusive; j++ {
 			if contextItemRole(items[j]) != "tool" {
 				break
 			}
@@ -321,8 +622,66 @@ func completedContextToolGroupsBefore(items []any, endExclusive int) []contextIt
 			groups = append(groups, contextItemGroup{indexes: indexes})
 		}
 	}
-	for left, right := 0, len(groups)-1; left < right; left, right = left+1, right-1 {
-		groups[left], groups[right] = groups[right], groups[left]
+	return groups
+}
+
+func completedAnthropicContextToolGroupsBefore(items []any, endExclusive int) []contextItemGroup {
+	if endExclusive > len(items) {
+		endExclusive = len(items)
+	}
+	groups := make([]contextItemGroup, 0)
+	for i := 0; i < endExclusive; i++ {
+		assistant, ok := items[i].(map[string]any)
+		if !ok || contextItemRole(assistant) != "assistant" {
+			continue
+		}
+		toolUseIDs := contextAnthropicToolUseIDSet(assistant)
+		if len(toolUseIDs) == 0 {
+			continue
+		}
+		for j := i + 1; j < endExclusive; j++ {
+			resultMessage, ok := items[j].(map[string]any)
+			if !ok || contextItemRole(resultMessage) != "user" {
+				break
+			}
+			resultIDs := contextAnthropicToolResultIDSet(resultMessage)
+			if len(resultIDs) == 0 {
+				break
+			}
+			matchedAll := true
+			for id := range toolUseIDs {
+				if _, ok := resultIDs[id]; !ok {
+					matchedAll = false
+					break
+				}
+			}
+			if matchedAll {
+				indexes := []int{i, j}
+				for k := i - 1; k >= 0; k-- {
+					requestMessage, ok := items[k].(map[string]any)
+					if !ok {
+						continue
+					}
+					role := contextItemRole(requestMessage)
+					if role == "system" || role == "developer" {
+						continue
+					}
+					if role == "user" {
+						if len(contextAnthropicToolResultIDSet(requestMessage)) > 0 {
+							continue
+						}
+						indexes = append([]int{k}, indexes...)
+						break
+					}
+					if role == "assistant" && len(contextAnthropicToolUseIDSet(requestMessage)) > 0 {
+						continue
+					}
+					break
+				}
+				groups = append(groups, contextItemGroup{indexes: indexes})
+			}
+			break
+		}
 	}
 	return groups
 }
@@ -346,7 +705,8 @@ func contextItemRole(item any) string {
 }
 
 func contextItemHasToolCall(item any) bool {
-	return len(contextToolCallIDSet(item)) > 0
+	message, _ := item.(map[string]any)
+	return len(contextToolCallIDSet(item)) > 0 || len(contextAnthropicToolUseIDSet(message)) > 0
 }
 
 func contextToolCallIDSet(item any) map[string]struct{} {
@@ -388,24 +748,199 @@ func contextToolResultID(item any) string {
 	return ""
 }
 
-func truncateLatestUserContextItem(items []any, budget int, stats *contextTrimStats) []any {
-	latestUserIndex := -1
-	for i, item := range items {
-		if role := contextItemRole(item); role == "user" {
-			latestUserIndex = i
+func contextAnthropicToolUseIDSet(message map[string]any) map[string]struct{} {
+	blocks, _ := message["content"].([]any)
+	out := make(map[string]struct{})
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok || strings.TrimSpace(fmt.Sprint(block["type"])) != "tool_use" {
+			continue
+		}
+		if id, _ := block["id"].(string); id != "" {
+			out[id] = struct{}{}
 		}
 	}
-	if latestUserIndex < 0 {
-		latestUserIndex = len(items) - 1
-	}
+	return out
+}
 
-	withoutLatest := append([]any{}, items[:latestUserIndex]...)
-	if latestUserIndex+1 < len(items) {
-		withoutLatest = append(withoutLatest, items[latestUserIndex+1:]...)
+func contextAnthropicToolResultIDSet(message map[string]any) map[string]struct{} {
+	blocks, _ := message["content"].([]any)
+	out := make(map[string]struct{})
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok || strings.TrimSpace(fmt.Sprint(block["type"])) != "tool_result" {
+			continue
+		}
+		if id, _ := block["tool_use_id"].(string); id != "" {
+			out[id] = struct{}{}
+		}
 	}
-	remaining := budget - contextEstimateItemsTokens(withoutLatest) - 16
-	if remaining < 64 {
-		remaining = 64
+	return out
+}
+
+func truncateNewestContextToolResultsForBudget(items []any, budget int, stats *contextTrimStats) []any {
+	slots := contextToolResultSlots(items)
+	if len(slots) == 0 {
+		return items
+	}
+	emptyItems, ok := cloneContextJSONValue(items).([]any)
+	if !ok {
+		return items
+	}
+	for _, slot := range slots {
+		if !setContextToolResultSlotValue(emptyItems, slot, "") {
+			return items
+		}
+	}
+	contentBudget := budget - contextEstimateItemsTokens(emptyItems)
+	const minimumPerResult = 64
+	if contentBudget < len(slots)*minimumPerResult {
+		return items
+	}
+	perResult := contentBudget / len(slots)
+	remainder := contentBudget % len(slots)
+	for i, slot := range slots {
+		value, ok := contextToolResultSlotValue(items, slot)
+		if !ok {
+			return items
+		}
+		resultBudget := perResult
+		if i == len(slots)-1 {
+			resultBudget += remainder
+		}
+		trimmed, changed := trimContextContentToBudget(value, resultBudget)
+		if !changed {
+			continue
+		}
+		if !setContextToolResultSlotValue(items, slot, trimmed) {
+			return items
+		}
+		stats.TruncatedItems++
+	}
+	return items
+}
+
+type contextToolResultSlot struct {
+	itemIndex  int
+	blockIndex int
+	field      string
+}
+
+func contextToolResultSlots(items []any) []contextToolResultSlot {
+	slots := make([]contextToolResultSlot, 0)
+	for itemIndex, item := range items {
+		message, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch contextItemRole(message) {
+		case "tool":
+			field := "content"
+			if strings.TrimSpace(fmt.Sprint(message["type"])) == "function_call_output" {
+				field = "output"
+			}
+			if _, ok := message[field]; ok {
+				slots = append(slots, contextToolResultSlot{itemIndex: itemIndex, blockIndex: -1, field: field})
+			}
+		case "user":
+			blocks, _ := message["content"].([]any)
+			for blockIndex, rawBlock := range blocks {
+				block, ok := rawBlock.(map[string]any)
+				if !ok || strings.TrimSpace(fmt.Sprint(block["type"])) != "tool_result" {
+					continue
+				}
+				if _, ok := block["content"]; ok {
+					slots = append(slots, contextToolResultSlot{itemIndex: itemIndex, blockIndex: blockIndex, field: "content"})
+				}
+			}
+		}
+	}
+	return slots
+}
+
+func contextToolResultSlotValue(items []any, slot contextToolResultSlot) (any, bool) {
+	if slot.itemIndex < 0 || slot.itemIndex >= len(items) {
+		return nil, false
+	}
+	message, ok := items[slot.itemIndex].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if slot.blockIndex < 0 {
+		value, ok := message[slot.field]
+		return value, ok
+	}
+	blocks, ok := message["content"].([]any)
+	if !ok || slot.blockIndex >= len(blocks) {
+		return nil, false
+	}
+	block, ok := blocks[slot.blockIndex].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	value, ok := block[slot.field]
+	return value, ok
+}
+
+func setContextToolResultSlotValue(items []any, slot contextToolResultSlot, value any) bool {
+	if slot.itemIndex < 0 || slot.itemIndex >= len(items) {
+		return false
+	}
+	message, ok := items[slot.itemIndex].(map[string]any)
+	if !ok {
+		return false
+	}
+	if slot.blockIndex < 0 {
+		message[slot.field] = value
+		return true
+	}
+	blocks, ok := message["content"].([]any)
+	if !ok || slot.blockIndex >= len(blocks) {
+		return false
+	}
+	block, ok := blocks[slot.blockIndex].(map[string]any)
+	if !ok {
+		return false
+	}
+	block[slot.field] = value
+	return true
+}
+
+func cloneContextJSONValue(value any) any {
+	switch typed := value.(type) {
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = cloneContextJSONValue(item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = cloneContextJSONValue(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func cloneContextMap(value map[string]any) map[string]any {
+	out, _ := cloneContextJSONValue(value).(map[string]any)
+	return out
+}
+
+func truncateLatestOrdinaryUserContextItem(items []any, budget int, stats *contextTrimStats) []any {
+	latestUserIndex := -1
+	for i, item := range items {
+		message, ok := item.(map[string]any)
+		if !ok || contextItemRole(message) != "user" || len(contextAnthropicToolResultIDSet(message)) > 0 {
+			continue
+		}
+		latestUserIndex = i
+	}
+	if latestUserIndex < 0 {
+		return items
 	}
 
 	message, ok := items[latestUserIndex].(map[string]any)
@@ -415,6 +950,14 @@ func truncateLatestUserContextItem(items []any, budget int, stats *contextTrimSt
 	content, ok := message["content"]
 	if !ok {
 		return items
+	}
+	emptyMessage := cloneContextMap(message)
+	emptyMessage["content"] = ""
+	withEmptyContent := append([]any{}, items...)
+	withEmptyContent[latestUserIndex] = emptyMessage
+	remaining := budget - contextEstimateItemsTokens(withEmptyContent)
+	if remaining < 16 {
+		remaining = 16
 	}
 	trimmed, changed := trimContextContentToBudget(content, remaining)
 	if !changed {
@@ -441,8 +984,8 @@ func trimContextContentToBudget(value any, budget int) (any, bool) {
 		for i := len(out) - 1; i >= 0; i-- {
 			withoutItemCost := contextEstimateAnyTokens(out) - contextEstimateAnyTokens(out[i])
 			itemBudget := budget - withoutItemCost - 1
-			if itemBudget < 64 {
-				itemBudget = 64
+			if itemBudget < 16 {
+				itemBudget = 16
 			}
 			trimmed, changed := trimContextContentToBudget(out[i], itemBudget)
 			if !changed {
@@ -451,7 +994,7 @@ func trimContextContentToBudget(value any, budget int) (any, bool) {
 			out[i] = trimmed
 			return out, true
 		}
-		return trimJSONishToContextBudget(out, budget), true
+		return value, false
 	case map[string]any:
 		out := make(map[string]any, len(typed))
 		for key, item := range typed {
@@ -464,8 +1007,8 @@ func trimContextContentToBudget(value any, budget int) (any, bool) {
 			}
 			withoutValueCost := contextEstimateAnyTokens(out) - contextEstimateAnyTokens(raw)
 			valueBudget := budget - withoutValueCost - 1
-			if valueBudget < 64 {
-				valueBudget = 64
+			if valueBudget < 16 {
+				valueBudget = 16
 			}
 			trimmed, changed := trimContextContentToBudget(raw, valueBudget)
 			if !changed {
@@ -474,18 +1017,10 @@ func trimContextContentToBudget(value any, budget int) (any, bool) {
 			out[key] = trimmed
 			return out, true
 		}
-		return trimJSONishToContextBudget(out, budget), true
+		return value, false
 	default:
-		return trimJSONishToContextBudget(value, budget), true
+		return value, false
 	}
-}
-
-func trimJSONishToContextBudget(value any, budget int) string {
-	data, err := json.Marshal(value)
-	if err != nil {
-		data = []byte(fmt.Sprint(value))
-	}
-	return trimStringPreservingEdgesToContextBudget(string(data), budget)
 }
 
 func contextEstimateItemsTokens(items []any) int {
