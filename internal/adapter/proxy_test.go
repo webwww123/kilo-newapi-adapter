@@ -107,13 +107,6 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 			body:         `{"model":"unknown-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`,
 			upstreamPath: "/messages",
 		},
-		{
-			name:         "non-v1 chat completions",
-			method:       http.MethodPost,
-			path:         "/chat/completions",
-			body:         `{"messages":[{"role":"user","content":"hi"}]}`,
-			upstreamPath: "/chat/completions",
-		},
 	}
 
 	for _, tc := range cases {
@@ -148,8 +141,37 @@ func TestProxyRoutesStandardAndNonV1Paths(t *testing.T) {
 	if (*calls)[2].Body["model"] != "unknown-model" {
 		t.Fatalf("unknown model should pass through unchanged: %#v", (*calls)[2].Body["model"])
 	}
-	if _, ok := (*calls)[3].Body["model"]; ok {
-		t.Fatalf("missing model should remain missing, got: %#v", (*calls)[3].Body["model"])
+}
+
+func TestProxyRejectsMissingOrInvalidModelLocally(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing", body: `{"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "empty", body: `{"model":"   ","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "prefix only", body: `{"model":"kilo/","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "wrong type", body: `{"model":42,"messages":[{"role":"user","content":"hi"}]}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJSON(t, handler, "/v1/chat/completions", tc.body)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
+				t.Fatalf("unexpected error body: %s", rec.Body.String())
+			}
+		})
+	}
+
+	if len(*calls) != 0 {
+		t.Fatalf("invalid model requests reached upstream: %#v", *calls)
 	}
 }
 
@@ -167,6 +189,7 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer client-token")
 	req.Header.Set("Cookie", "session=client")
 	req.Header.Set("X-Provider-Base-URL", "https://example.invalid")
+	req.Header.Set("Accept-Encoding", "gzip")
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -188,6 +211,9 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 	if got := header.Get("X-Provider-Base-URL"); got != "" {
 		t.Fatalf("provider override leaked upstream: %q", got)
+	}
+	if got := header.Get("Accept-Encoding"); got != "identity" {
+		t.Fatalf("accept-encoding = %q, want identity for response sanitization", got)
 	}
 }
 
@@ -282,6 +308,230 @@ func TestProxyPrefixesSuccessResponseModelAndRemovesProvider(t *testing.T) {
 	}
 	if !strings.Contains(body, `"model":"kilo/tencent/hy3:free"`) {
 		t.Fatalf("success response did not return public request model: %s", body)
+	}
+}
+
+func TestProxySanitizesSuccessJSONAcrossProtocols(t *testing.T) {
+	publicModel := "kilo/public-model"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Retry-After", "7")
+		w.Header().Set("Server", "upstream-server")
+		w.Header().Set("Via", "internal-proxy")
+		w.Header().Set("CF-Ray", "internal-ray")
+		w.Header().Set("NEL", `{"report_to":"internal"}`)
+		w.Header().Set("Report-To", `{"group":"internal"}`)
+		w.Header().Set("X-Upstream-Proxy", "internal-proxy")
+		w.Header().Set("X-Provider-Name", "InternalProvider")
+		w.Header().Set("X-Request-ID", "internal-request")
+
+		switch r.URL.Path {
+		case "/chat/completions":
+			_, _ = w.Write([]byte(`{
+				"id":"gen_upstream_chat",
+				"object":"chat.completion",
+				"model":"real/upstream-chat",
+				"provider":"InternalProvider",
+				"generationId":"gen_internal",
+				"system_fingerprint":"fp_internal",
+				"service_tier":"provider-tier",
+				"choices":[{"message":{"role":"assistant","content":"OK","provider_metadata":{"gateway":{"cost":"1","routing":{"finalProvider":"internal","providerRequestId":"request_internal"}}},"tool_calls":[{"id":"call_upstream","type":"function","function":{"name":"lookup","arguments":"{\\\"provider\\\":\\\"customer-provider\\\",\\\"model\\\":\\\"customer-model\\\",\\\"cost\\\":7}"}}]}}],
+				"usage":{"prompt_tokens":1,"market_cost":0.1}
+			}`))
+		case "/messages":
+			_, _ = w.Write([]byte(`{
+				"id":"msg_upstream",
+				"type":"message",
+				"role":"assistant",
+				"model":"real/upstream-message",
+				"providerMetadata":{"generation_id":"gen_internal","provider_response_id":"response_internal"},
+				"content":[{"type":"tool_use","id":"toolu_upstream","name":"lookup","input":{"provider":"customer-provider","model":"customer-model","cost":7}}],
+				"usage":{"input_tokens":1,"output_tokens":1,"gatewayCost":0.2}
+			}`))
+		case "/responses":
+			_, _ = w.Write([]byte(`{
+				"id":"resp_upstream",
+				"object":"response",
+				"model":null,
+				"provider_metadata":{"gateway":{"marketCost":0.3,"routing":{"originalModelId":"real/upstream-response","providerAttempts":[{"credentialType":"byok","providerRequestId":"request_internal"}]}}},
+				"routing":{"fallbacksAvailable":[]},
+				"generation_id":"gen_internal",
+				"provider_request_id":"request_internal",
+				"native_finish_reason":"stop",
+				"output":[{"type":"message","id":"item_upstream","content":[{"type":"output_text","text":"OK"}]},{"type":"function_call","id":"call_upstream","name":"lookup","arguments":"{\\\"provider\\\":\\\"customer-provider\\\",\\\"model\\\":\\\"customer-model\\\",\\\"cost\\\":7}"}],
+				"usage":{"input_tokens":1,"output_tokens":1,"cost_details":{"upstream_cost":0.3}}
+			}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	tests := []struct {
+		name              string
+		path              string
+		body              string
+		expectedID        string
+		preservedToolData []string
+	}{
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}]}`, expectedID: "gen_upstream_chat", preservedToolData: []string{"customer-provider", "customer-model", `\\\"cost\\\":7`}},
+		{name: "messages", path: "/v1/messages", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`, expectedID: "msg_upstream", preservedToolData: []string{"customer-provider", "customer-model", `"cost":7`}},
+		{name: "responses", path: "/v1/responses", body: `{"model":"kilo/public-model","input":"hi"}`, expectedID: "resp_upstream", preservedToolData: []string{"customer-provider", "customer-model", `\\\"cost\\\":7`}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJSON(t, handler, tc.path, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+
+			var payload any
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+			}
+			assertSanitizedSuccessValue(t, payload, publicModel, false)
+			if !strings.Contains(rec.Body.String(), `"id":"`+tc.expectedID+`"`) {
+				t.Fatalf("standard response id was unexpectedly removed: %s", rec.Body.String())
+			}
+			for _, expected := range tc.preservedToolData {
+				if !strings.Contains(rec.Body.String(), expected) {
+					t.Fatalf("tool payload lost %q: %s", expected, rec.Body.String())
+				}
+			}
+
+			for _, stripped := range []string{"Server", "Via", "CF-Ray", "NEL", "Report-To", "X-Upstream-Proxy", "X-Provider-Name", "X-Request-ID"} {
+				if got := rec.Header().Get(stripped); got != "" {
+					t.Fatalf("response header %s leaked: %q", stripped, got)
+				}
+			}
+			if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "application/json") {
+				t.Fatalf("content-type = %q", got)
+			}
+			if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("cache-control = %q", got)
+			}
+			if got := rec.Header().Get("Retry-After"); got != "7" {
+				t.Fatalf("retry-after = %q", got)
+			}
+		})
+	}
+}
+
+func TestProxySanitizesSuccessSSEAcrossProtocols(t *testing.T) {
+	publicModel := "kilo/public-model"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("X-Upstream-Proxy", "internal-proxy")
+		flusher, _ := w.(http.Flusher)
+
+		switch r.URL.Path {
+		case "/chat/completions":
+			_, _ = io.WriteString(w, "data: {\"id\":\"gen_upstream_chat\",\"model\":\"real/upstream-chat\",\"provider_metadata\":{\"gateway\":{\"cost\":1,\"generationId\":\"gen_internal\"}},\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_upstream\",\"function\":{\"arguments\":\"{\\\\\\\"provider\\\\\\\":\\\\\\\"customer-provider\\\\\\\",\\\\\\\"model\\\\\\\":\\\\\\\"customer-model\\\\\\\",\\\\\\\"cost\\\\\\\":7}\"}}]}}]}\n\n")
+			_, _ = io.WriteString(w, "data: {\"id\":\"gen_upstream_chat\",\"model\":null,\"usage\":{\"marketCost\":1,\"output_tokens\":1}}\n\n")
+		case "/messages":
+			_, _ = io.WriteString(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_upstream\",\"model\":\"real/upstream-message\",\"providerMetadata\":{\"routing\":{\"providerRequestId\":\"request_internal\"}}}}\n\n")
+			_, _ = io.WriteString(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_upstream\",\"name\":\"lookup\",\"input\":{\"provider\":\"customer-provider\",\"model\":\"customer-model\",\"cost\":7}}}\n\n")
+		case "/responses":
+			_, _ = io.WriteString(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_upstream\",\"model\":\"real/upstream-response\",\"provider_metadata\":{\"gateway\":{\"routing\":{\"finalProvider\":\"internal\"},\"providerResponseId\":\"response_internal\"}},\"output\":[{\"type\":\"function_call\",\"id\":\"call_upstream\",\"arguments\":\"{\\\\\\\"provider\\\\\\\":\\\\\\\"customer-provider\\\\\\\",\\\\\\\"model\\\\\\\":\\\\\\\"customer-model\\\\\\\",\\\\\\\"cost\\\\\\\":7}\"}]}}\n\n")
+			_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_upstream\",\"model\":null,\"generation_id\":\"gen_internal\",\"usage\":{\"output_tokens\":1,\"surchargeCost\":1}}}\n\n")
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	tests := []struct {
+		name              string
+		path              string
+		body              string
+		expectedID        string
+		preservedToolData []string
+	}{
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"stream":true}`, expectedID: "gen_upstream_chat", preservedToolData: []string{"customer-provider", "customer-model", `\\\"cost\\\":7`}},
+		{name: "messages", path: "/v1/messages", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}`, expectedID: "msg_upstream", preservedToolData: []string{"customer-provider", "customer-model", `"cost":7`}},
+		{name: "responses", path: "/v1/responses", body: `{"model":"kilo/public-model","input":"hi","stream":true}`, expectedID: "resp_upstream", preservedToolData: []string{"customer-provider", "customer-model", `\\\"cost\\\":7`}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJSON(t, handler, tc.path, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("X-Upstream-Proxy"); got != "" {
+				t.Fatalf("response header leaked: %q", got)
+			}
+			if !strings.Contains(rec.Body.String(), "data: [DONE]") {
+				t.Fatalf("stream lost DONE marker: %s", rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), `"id":"`+tc.expectedID+`"`) {
+				t.Fatalf("standard stream id was unexpectedly removed: %s", rec.Body.String())
+			}
+			for _, expected := range tc.preservedToolData {
+				if !strings.Contains(rec.Body.String(), expected) {
+					t.Fatalf("stream tool payload lost %q: %s", expected, rec.Body.String())
+				}
+			}
+
+			payloads := decodeSSEDataPayloads(t, rec.Body.String())
+			if len(payloads) == 0 {
+				t.Fatalf("stream contained no JSON payloads: %s", rec.Body.String())
+			}
+			for _, payload := range payloads {
+				assertSanitizedSuccessValue(t, payload, publicModel, false)
+			}
+		})
+	}
+}
+
+func TestProxyFailsClosedForSSEErrorAndNonJSONData(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"error\",\"error\":{\"message\":\"InternalProvider failed at https://internal.example for real/upstream-model\"}}\n\n")
+		_, _ = io.WriteString(w, "data: InternalProvider raw failure from https://internal.example\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"stream":true}`},
+		{name: "messages", path: "/v1/messages", body: `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16,"stream":true}`},
+		{name: "responses", path: "/v1/responses", body: `{"model":"kilo/public-model","input":"hi","stream":true}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := postJSON(t, handler, tc.path, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			for _, leaked := range []string{"InternalProvider", "internal.example", "real/upstream-model"} {
+				if strings.Contains(rec.Body.String(), leaked) {
+					t.Fatalf("SSE error leaked %q: %s", leaked, rec.Body.String())
+				}
+			}
+			payloads := decodeSSEDataPayloads(t, rec.Body.String())
+			if len(payloads) != 2 {
+				t.Fatalf("sanitized SSE payloads = %d, want 2: %s", len(payloads), rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "upstream request failed") {
+				t.Fatalf("sanitized SSE error missing generic message: %s", rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -653,4 +903,84 @@ func messagesContainText(messages []any, text string) bool {
 		}
 	}
 	return false
+}
+
+func decodeSSEDataPayloads(t *testing.T, body string) []any {
+	t.Helper()
+	var payloads []any
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var payload any
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			t.Fatalf("decode SSE data %q: %v", data, err)
+		}
+		payloads = append(payloads, payload)
+	}
+	return payloads
+}
+
+func assertSanitizedSuccessValue(t *testing.T, value any, publicModel string, opaque bool) {
+	t.Helper()
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			normalized := normalizeTestJSONKey(key)
+			if !opaque && isInternalSuccessTestKey(normalized) {
+				t.Fatalf("success response leaked internal field %q in %#v", key, typed)
+			}
+			childOpaque := opaque || isOpaqueSuccessTestKey(normalized)
+			if !childOpaque && normalized == "model" {
+				model, ok := item.(string)
+				if !ok || model != publicModel {
+					t.Fatalf("model = %#v, want public request model %q", item, publicModel)
+				}
+			}
+			assertSanitizedSuccessValue(t, item, publicModel, childOpaque)
+		}
+	case []any:
+		for _, item := range typed {
+			assertSanitizedSuccessValue(t, item, publicModel, opaque)
+		}
+	}
+}
+
+func normalizeTestJSONKey(key string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(key) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
+}
+
+func isOpaqueSuccessTestKey(key string) bool {
+	switch key {
+	case "input", "arguments", "metadata", "parameters", "schema", "json", "parsed", "data":
+		return true
+	default:
+		return false
+	}
+}
+
+func isInternalSuccessTestKey(key string) bool {
+	if strings.Contains(key, "cost") || strings.Contains(key, "provider") || strings.Contains(key, "routing") || strings.HasPrefix(key, "fallback") {
+		return true
+	}
+	if strings.HasSuffix(key, "requestid") || strings.HasSuffix(key, "generationid") {
+		return true
+	}
+	switch key {
+	case "systemfingerprint", "servicetier", "nativefinishreason", "originalmodelid", "canonicalslug", "modelattempts", "providerattempts", "credentialtype", "planningreasoning", "isbyok":
+		return true
+	default:
+		return false
+	}
 }

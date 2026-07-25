@@ -192,7 +192,15 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		})
 		return
 	}
-	publicRequestModel := prefixPublicModelIfSet(extractModel(body))
+	publicRequestModel, err := validatePublicRequestModel(body)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
 
 	body, err = stripPublicModelPrefix(body)
 	if err != nil {
@@ -230,6 +238,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	defer resp.Body.Close()
 
 	copyResponseHeaders(w.Header(), resp.Header)
+	w.Header().Set("Cache-Control", "no-store")
 	if resp.StatusCode == http.StatusTooManyRequests {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -277,14 +286,14 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	if isEventStreamResponse(resp.Header) {
-		copyEventStreamWithNormalizeAndCapture(w, resp.Body, capture, publicRequestModel)
+		copyEventStreamWithNormalizeAndCapture(w, resp.Body, capture, publicRequestModel, upstreamPath)
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
 			fmt.Printf("upstream_success_read_error=%v\n", readErr)
 			return
 		}
-		responseBody = normalizeSuccessResponseBody(responseBody, publicRequestModel)
+		responseBody = normalizeSuccessResponseBody(responseBody, publicRequestModel, upstreamPath, false)
 		_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
 	}
 	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
@@ -403,7 +412,7 @@ func stripPublicModelPrefix(body []byte) ([]byte, error) {
 	}
 	if object, ok := payload.(map[string]any); ok {
 		if raw, ok := object["model"].(string); ok {
-			object["model"] = strings.TrimPrefix(raw, publicModelPrefix)
+			object["model"] = strings.TrimPrefix(strings.TrimSpace(raw), publicModelPrefix)
 		}
 	}
 	encoded, err := json.Marshal(payload)
@@ -471,20 +480,41 @@ func prefixPublicModel(model string) string {
 	return publicModelPrefix + model
 }
 
-func prefixPublicModelIfSet(model string) string {
-	model = strings.TrimSpace(model)
-	if model == "" {
-		return ""
+func validatePublicRequestModel(body []byte) (string, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("invalid JSON body: %w", err)
 	}
-	return prefixPublicModel(model)
+	raw, ok := payload["model"]
+	if !ok {
+		return "", errors.New("model must be a non-empty string")
+	}
+	model, ok := raw.(string)
+	if !ok || strings.TrimSpace(model) == "" {
+		return "", errors.New("model must be a non-empty string")
+	}
+	model = strings.TrimPrefix(strings.TrimSpace(model), publicModelPrefix)
+	if model == "" {
+		return "", errors.New("model must be a non-empty string")
+	}
+	return prefixPublicModel(model), nil
 }
 
-func normalizeSuccessResponseBody(body []byte, publicModel string) []byte {
+type successSanitizeContext struct {
+	envelope    bool
+	ensureModel bool
+	usage       bool
+}
+
+func normalizeSuccessResponseBody(body []byte, publicModel string, upstreamPath string, streaming bool) []byte {
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return body
+		return publicUpstreamErrorBody(upstreamPath)
 	}
-	normalizeSuccessPayload(payload, publicModel)
+	if successPayloadHasError(payload) {
+		return publicUpstreamErrorBody(upstreamPath)
+	}
+	normalizeSuccessPayload(payload, publicModel, upstreamPath, successRootContext(upstreamPath, streaming))
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return body
@@ -492,47 +522,159 @@ func normalizeSuccessResponseBody(body []byte, publicModel string) []byte {
 	return encoded
 }
 
-func normalizeSuccessPayload(value any, publicModel string) {
+func successRootContext(upstreamPath string, streaming bool) successSanitizeContext {
+	context := successSanitizeContext{envelope: true}
+	if !streaming || upstreamPath == "/chat/completions" {
+		context.ensureModel = true
+	}
+	return context
+}
+
+func normalizeSuccessPayload(value any, publicModel string, upstreamPath string, context successSanitizeContext) {
 	switch typed := value.(type) {
 	case map[string]any:
+		hasModel := false
 		for key, item := range typed {
-			switch key {
-			case "model":
-				if raw, ok := item.(string); ok {
-					typed[key] = normalizeSuccessModel(raw, publicModel)
-					continue
-				}
-			case "provider", "provider_name":
+			normalizedKey := normalizeSuccessFieldName(key)
+			if normalizedKey == "providermetadata" || ((context.envelope || context.usage) && shouldRemoveSuccessField(normalizedKey)) {
 				delete(typed, key)
 				continue
 			}
-			normalizeSuccessPayload(item, publicModel)
+			if context.envelope && normalizedKey == "model" {
+				typed[key] = publicModel
+				hasModel = true
+				continue
+			}
+			if isOpaqueSuccessField(normalizedKey) {
+				continue
+			}
+			normalizeSuccessPayload(item, publicModel, upstreamPath, successChildContext(normalizedKey, upstreamPath, context))
+		}
+		if context.ensureModel && !hasModel && publicModel != "" {
+			typed["model"] = publicModel
 		}
 	case []any:
 		for _, item := range typed {
-			normalizeSuccessPayload(item, publicModel)
+			normalizeSuccessPayload(item, publicModel, upstreamPath, context)
 		}
 	}
 }
 
-func normalizeSuccessModel(upstreamModel string, publicModel string) string {
-	if publicModel != "" {
-		return publicModel
+func successChildContext(key string, upstreamPath string, parent successSanitizeContext) successSanitizeContext {
+	if parent.usage {
+		return successSanitizeContext{usage: true}
 	}
-	return prefixPublicModel(upstreamModel)
+	switch key {
+	case "usage", "usagedetails", "tokenusage":
+		return successSanitizeContext{usage: true}
+	case "response":
+		return successSanitizeContext{envelope: true, ensureModel: true}
+	case "message":
+		return successSanitizeContext{envelope: true, ensureModel: upstreamPath == "/messages"}
+	case "choices", "choice", "delta", "output", "item", "content", "contentblock":
+		return successSanitizeContext{envelope: true}
+	default:
+		return successSanitizeContext{envelope: parent.envelope}
+	}
+}
+
+func successPayloadHasError(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if rawType, ok := typed["type"].(string); ok && strings.EqualFold(strings.TrimSpace(rawType), "error") {
+			return true
+		}
+		for key, item := range typed {
+			normalizedKey := normalizeSuccessFieldName(key)
+			if normalizedKey == "error" && meaningfulErrorValue(item) {
+				return true
+			}
+			if isOpaqueSuccessField(normalizedKey) {
+				continue
+			}
+			if successPayloadHasError(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if successPayloadHasError(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func meaningfulErrorValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case map[string]any:
+		return len(typed) > 0
+	case []any:
+		return len(typed) > 0
+	case bool:
+		return typed
+	default:
+		return true
+	}
+}
+
+func publicUpstreamErrorBody(upstreamPath string) []byte {
+	if upstreamPath == "/messages" {
+		return []byte(`{"type":"error","error":{"type":"api_error","message":"upstream request failed"}}`)
+	}
+	return []byte(`{"error":{"message":"upstream request failed","type":"upstream_error","code":"upstream_error"}}`)
+}
+
+func normalizeSuccessFieldName(key string) string {
+	var builder strings.Builder
+	for _, r := range strings.ToLower(key) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+		}
+	}
+	return builder.String()
+}
+
+func isOpaqueSuccessField(key string) bool {
+	switch key {
+	case "input", "arguments", "metadata", "parameters", "schema", "json", "parsed", "data":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRemoveSuccessField(key string) bool {
+	if strings.Contains(key, "cost") || strings.Contains(key, "provider") || strings.Contains(key, "routing") || strings.HasPrefix(key, "fallback") {
+		return true
+	}
+	if strings.HasSuffix(key, "requestid") || strings.HasSuffix(key, "generationid") {
+		return true
+	}
+	switch key {
+	case "systemfingerprint", "servicetier", "nativefinishreason", "originalmodelid", "canonicalslug", "modelattempts", "credentialtype", "planningreasoning", "isbyok", "userid", "accountid", "organizationid", "sessionid", "chatid":
+		return true
+	default:
+		return false
+	}
 }
 
 func isEventStreamResponse(header http.Header) bool {
 	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/event-stream")
 }
 
-func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string) {
+func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(r)
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			chunk := normalizeEventStreamLine(line, publicModel)
+			chunk := normalizeEventStreamLine(line, publicModel, upstreamPath)
 			if capture != nil {
 				_, _ = capture.Write(chunk)
 			}
@@ -547,7 +689,7 @@ func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, 
 	}
 }
 
-func normalizeEventStreamLine(line []byte, publicModel string) []byte {
+func normalizeEventStreamLine(line []byte, publicModel string, upstreamPath string) []byte {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmed):]
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
@@ -557,7 +699,7 @@ func normalizeEventStreamLine(line []byte, publicModel string) []byte {
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
 		return line
 	}
-	normalized := normalizeSuccessResponseBody(data, publicModel)
+	normalized := normalizeSuccessResponseBody(data, publicModel, upstreamPath, true)
 	output := make([]byte, 0, len("data: ")+len(normalized)+len(lineEnding))
 	output = append(output, "data: "...)
 	output = append(output, normalized...)
@@ -582,6 +724,7 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 	}
 	copyRequestHeaders(req.Header, original.Header)
 	req.Header.Set("Connection", "close")
+	req.Header.Set("Accept-Encoding", "identity")
 	req.Header.Set("User-Agent", "kilo-newapi-adapter/0.1")
 	if body != nil && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -638,6 +781,7 @@ func copyRequestHeaders(dst, src http.Header) {
 func shouldStripRequestHeader(key string) bool {
 	switch strings.ToLower(key) {
 	case "authorization",
+		"accept-encoding",
 		"cookie",
 		"proxy-authorization",
 		"x-provider-base-url",
@@ -655,12 +799,29 @@ func shouldStripRequestHeader(key string) bool {
 
 func copyResponseHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Content-Length") {
+		if !shouldForwardResponseHeader(key) {
 			continue
 		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
+	}
+}
+
+func shouldForwardResponseHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "content-type",
+		"cache-control",
+		"content-language",
+		"retry-after",
+		"vary",
+		"access-control-allow-origin",
+		"access-control-allow-methods",
+		"access-control-allow-headers",
+		"access-control-expose-headers":
+		return true
+	default:
+		return false
 	}
 }
 
