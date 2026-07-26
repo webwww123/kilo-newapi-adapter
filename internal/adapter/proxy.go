@@ -212,6 +212,19 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
+	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+	if jsonModeDowngraded {
+		fmt.Printf("kilo_json_mode_downgrade path=%s model=%s mode=json_object\n", upstreamPath, stepfunFlashFreeModel)
+	}
+
 	body, trimStats, err := trimFreeModelContext(body, upstreamPath)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())

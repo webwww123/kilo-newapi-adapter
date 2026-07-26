@@ -67,6 +67,11 @@ The trim policy keeps system/developer items, the originating user request, and 
 
 Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
 
+Kilo's provider pool for `stepfun/step-3.7-flash:free` inconsistently rejects OpenAI
+`response_format: {"type":"json_object"}` requests. For Chat Completions, the adapter
+therefore removes that upstream field and appends an equivalent JSON-only system instruction.
+Other models, response format types, request fields, messages, and streaming settings are left unchanged.
+
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.
 The log directory is created with `0700`, files are created with `0600`, and files older than `REQUEST_LOG_RETENTION` are removed at startup.
