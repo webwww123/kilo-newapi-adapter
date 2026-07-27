@@ -217,6 +217,29 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 }
 
+func TestProxyDropsResponseFormatForLingChatCompletions(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+	body := `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"give data"}],"response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup"}}]}`
+
+	rec := postJSON(t, handler, "/v1/chat/completions", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("upstream calls=%d, want 1", len(*calls))
+	}
+
+	call := (*calls)[0]
+	if _, exists := call.Body["response_format"]; exists {
+		t.Fatalf("response_format reached upstream: %#v", call.Body)
+	}
+	if len(call.Body["messages"].([]any)) != 1 || len(call.Body["tools"].([]any)) != 1 {
+		t.Fatalf("messages or tools changed: %#v", call.Body)
+	}
+}
+
 func TestModelsPrefixesUpstreamIDsForPublicListing(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()

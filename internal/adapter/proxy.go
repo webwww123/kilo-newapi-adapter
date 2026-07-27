@@ -212,6 +212,19 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
+	body, responseFormatDropped, err := dropLingResponseFormat(body, upstreamPath)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+	if responseFormatDropped {
+		fmt.Printf("kilo_response_format_drop path=%s model=%s\n", upstreamPath, lingFlashFreeModel)
+	}
+
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
