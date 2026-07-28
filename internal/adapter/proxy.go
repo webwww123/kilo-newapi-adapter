@@ -310,20 +310,38 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 
 	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 	w.Header().Del("Content-Length")
-	w.WriteHeader(resp.StatusCode)
+	responseStatus := resp.StatusCode
 	if isEventStreamResponse(resp.Header) {
+		w.WriteHeader(responseStatus)
 		copyEventStreamWithNormalizeAndCapture(w, resp.Body, capture, publicRequestModel, upstreamPath)
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
+			responseStatus = http.StatusBadGateway
+			responseBody = publicUpstreamErrorBody(upstreamPath)
+			w.WriteHeader(responseStatus)
+			_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
 			fmt.Printf("upstream_success_read_error=%v\n", readErr)
+			h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+				status:        responseStatus,
+				bytesWritten:  capture.Total(),
+				contentType:   "application/json",
+				body:          capture.Bytes(),
+				bodyTruncated: capture.Truncated(),
+				upstreamError: readErr.Error(),
+			})
 			return
 		}
-		responseBody = normalizeSuccessResponseBody(responseBody, publicRequestModel, upstreamPath, false)
+		var validSuccess bool
+		responseBody, validSuccess = normalizeSuccessResponseBodyChecked(responseBody, publicRequestModel, upstreamPath, false)
+		if !validSuccess {
+			responseStatus = http.StatusBadGateway
+		}
+		w.WriteHeader(responseStatus)
 		_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
 	}
 	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
-		status:        resp.StatusCode,
+		status:        responseStatus,
 		bytesWritten:  capture.Total(),
 		contentType:   resp.Header.Get("Content-Type"),
 		body:          capture.Bytes(),
@@ -533,19 +551,24 @@ type successSanitizeContext struct {
 }
 
 func normalizeSuccessResponseBody(body []byte, publicModel string, upstreamPath string, streaming bool) []byte {
+	normalized, _ := normalizeSuccessResponseBodyChecked(body, publicModel, upstreamPath, streaming)
+	return normalized
+}
+
+func normalizeSuccessResponseBodyChecked(body []byte, publicModel string, upstreamPath string, streaming bool) ([]byte, bool) {
 	var payload any
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return publicUpstreamErrorBody(upstreamPath)
+		return publicUpstreamErrorBody(upstreamPath), false
 	}
 	if successPayloadHasError(payload) {
-		return publicUpstreamErrorBody(upstreamPath)
+		return publicUpstreamErrorBody(upstreamPath), false
 	}
 	normalizeSuccessPayload(payload, publicModel, upstreamPath, successRootContext(upstreamPath, streaming))
 	encoded, err := json.Marshal(payload)
 	if err != nil {
-		return body
+		return body, true
 	}
-	return encoded
+	return encoded, true
 }
 
 func successRootContext(upstreamPath string, streaming bool) successSanitizeContext {

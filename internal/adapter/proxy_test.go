@@ -334,6 +334,62 @@ func TestProxyPrefixesSuccessResponseModelAndRemovesProvider(t *testing.T) {
 	}
 }
 
+func TestProxyReturnsBadGatewayForHTTP200ErrorPayloads(t *testing.T) {
+	tests := []struct {
+		name         string
+		path         string
+		requestBody  string
+		upstreamBody string
+		leaked       string
+	}{
+		{
+			name:         "chat nested error",
+			path:         "/v1/chat/completions",
+			requestBody:  `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}]}`,
+			upstreamBody: `{"error":{"message":"InternalProvider failed at https://internal.example"}}`,
+			leaked:       "InternalProvider",
+		},
+		{
+			name:         "messages error envelope",
+			path:         "/v1/messages",
+			requestBody:  `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`,
+			upstreamBody: `{"type":"error","error":{"message":"real/upstream-model failed"}}`,
+			leaked:       "real/upstream-model",
+		},
+		{
+			name:         "responses invalid json",
+			path:         "/v1/responses",
+			requestBody:  `{"model":"kilo/public-model","input":"hi"}`,
+			upstreamBody: `upstream returned invalid JSON`,
+			leaked:       "invalid JSON",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, tc.upstreamBody)
+			}))
+			defer upstream.Close()
+
+			handler := newTestHandler(upstream.URL)
+			rec := postJSON(t, handler, tc.path, tc.requestBody)
+
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "upstream request failed") {
+				t.Fatalf("generic upstream error missing: %s", rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), tc.leaked) {
+				t.Fatalf("upstream detail leaked %q: %s", tc.leaked, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestProxySanitizesSuccessJSONAcrossProtocols(t *testing.T) {
 	publicModel := "kilo/public-model"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
