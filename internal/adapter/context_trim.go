@@ -80,6 +80,48 @@ func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrim
 	return out, stats, nil
 }
 
+func lingRequestStillExceedsContextLimit(body []byte, upstreamPath string) (bool, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false, fmt.Errorf("invalid JSON body: %w", err)
+	}
+	model, _ := payload["model"].(string)
+	model = strings.TrimPrefix(strings.TrimSpace(model), publicModelPrefix)
+	if model != lingFlashFreeModel {
+		return false, nil
+	}
+	profile, ok := freeContextTrimProfiles[model]
+	if !ok {
+		return false, nil
+	}
+	profile = normalizeContextTrimProfile(profile)
+	var stats contextTrimStats
+	path := strings.TrimRight(strings.TrimSpace(upstreamPath), "/")
+	switch path {
+	case "/chat/completions", "/messages":
+		items, ok := payload["messages"].([]any)
+		if !ok {
+			return false, nil
+		}
+		available := contextInputBudget(payload, profile, false, &stats)
+		available -= contextEstimateAnyTokens(payload["system"])
+		return available < 0 || contextEstimateItemsTokens(items) > available, nil
+	case "/responses":
+		available := contextInputBudget(payload, profile, true, &stats)
+		available -= contextEstimateAnyTokens(payload["instructions"])
+		switch input := payload["input"].(type) {
+		case []any:
+			return available < 0 || contextEstimateItemsTokens(input) > available, nil
+		case string:
+			return available < 0 || contextEstimateStringTokens(input) > available, nil
+		default:
+			return false, nil
+		}
+	default:
+		return false, nil
+	}
+}
+
 func normalizeContextTrimProfile(profile contextTrimProfile) contextTrimProfile {
 	if profile.SafetyMargin < 0 {
 		profile.SafetyMargin = 0

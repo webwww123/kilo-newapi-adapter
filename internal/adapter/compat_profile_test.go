@@ -2,23 +2,32 @@ package adapter
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
-func TestDropLingResponseFormatRemovesOnlyField(t *testing.T) {
+func TestNormalizeLingRequestDropsUnsupportedControls(t *testing.T) {
 	body := []byte(`{
 		"model":"inclusionai/ling-3.0-flash:free",
-		"messages":[{"role":"user","content":"give data"}],
+		"input":"give data",
 		"response_format":{"type":"json_object"},
+		"reasoning_effort":"high",
+		"reasoning":{"effort":"medium","summary":"auto"},
+		"text":{"format":{"type":"json_schema"},"verbosity":"medium"},
+		"output_config":{"effort":"high","format":{"type":"json_schema"},"other":"keep"},
+		"max_output_tokens":4096,
 		"stream":true,
 		"tools":[{"type":"function","function":{"name":"lookup"}}]
 	}`)
 
-	out, changed, err := dropLingResponseFormat(body, "/chat/completions")
+	out, stats, rejection, err := normalizeLingRequest(body, "/responses")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !changed {
+	if rejection != nil {
+		t.Fatalf("request was rejected: %#v", rejection)
+	}
+	if !stats.Changed || !stats.ReasoningDropped || !stats.StructuredOutputDropped {
 		t.Fatal("Ling request was not cleaned")
 	}
 
@@ -29,43 +38,115 @@ func TestDropLingResponseFormatRemovesOnlyField(t *testing.T) {
 	if _, exists := payload["response_format"]; exists {
 		t.Fatalf("response_format still present: %s", out)
 	}
+	if _, exists := payload["reasoning_effort"]; exists {
+		t.Fatalf("reasoning_effort still present: %s", out)
+	}
+	reasoning := payload["reasoning"].(map[string]any)
+	if _, exists := reasoning["effort"]; exists || reasoning["summary"] != "auto" {
+		t.Fatalf("reasoning cleanup changed unrelated fields: %#v", reasoning)
+	}
+	text := payload["text"].(map[string]any)
+	if _, exists := text["format"]; exists || text["verbosity"] != "medium" {
+		t.Fatalf("text cleanup changed unrelated fields: %#v", text)
+	}
+	outputConfig := payload["output_config"].(map[string]any)
+	if _, exists := outputConfig["effort"]; exists {
+		t.Fatalf("output_config effort still present: %#v", outputConfig)
+	}
+	if _, exists := outputConfig["format"]; exists || outputConfig["other"] != "keep" {
+		t.Fatalf("output_config cleanup changed unrelated fields: %#v", outputConfig)
+	}
 	if payload["stream"] != true {
 		t.Fatalf("stream changed: %#v", payload)
 	}
-	if len(payload["messages"].([]any)) != 1 || len(payload["tools"].([]any)) != 1 {
-		t.Fatalf("messages or tools changed: %#v", payload)
+	if payload["max_output_tokens"] != float64(4096) || len(payload["tools"].([]any)) != 1 {
+		t.Fatalf("output budget or tools changed: %#v", payload)
 	}
 }
 
-func TestDropLingResponseFormatLeavesOtherSurfacesUnchanged(t *testing.T) {
+func TestNormalizeLingRequestRejectsUnsupportedInputsInChinese(t *testing.T) {
 	tests := []struct {
-		name string
-		path string
-		body string
+		name    string
+		path    string
+		body    string
+		code    string
+		message string
 	}{
 		{
-			name: "other model",
-			path: "/chat/completions",
-			body: `{"model":"nvidia/other:free","messages":[],"response_format":{"type":"json_object"}}`,
+			name:    "image",
+			path:    "/chat/completions",
+			body:    `{"model":"inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`,
+			code:    "unsupported_image_input",
+			message: "当前模型不支持图片输入，请移除图片后重试",
 		},
 		{
-			name: "responses protocol",
-			path: "/responses",
-			body: `{"model":"inclusionai/ling-3.0-flash:free","input":"x","response_format":{"type":"json_object"}}`,
+			name:    "audio",
+			path:    "/responses",
+			body:    `{"model":"inclusionai/ling-3.0-flash:free","input":[{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"AA"}}]}]}`,
+			code:    "unsupported_audio_input",
+			message: "当前模型不支持音频输入，请移除音频后重试",
 		},
 		{
-			name: "missing response format",
-			path: "/chat/completions",
-			body: `{"model":"inclusionai/ling-3.0-flash:free","messages":[]}`,
+			name:    "video",
+			path:    "/messages",
+			body:    `{"model":"inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":[{"type":"video","source":{"data":"AA"}}]}]}`,
+			code:    "unsupported_video_input",
+			message: "当前模型不支持视频输入，请移除视频后重试",
+		},
+		{
+			name:    "embeddings",
+			path:    "/embeddings",
+			body:    `{"model":"inclusionai/ling-3.0-flash:free","input":"hello"}`,
+			code:    "unsupported_embeddings_model",
+			message: "当前模型不支持向量嵌入，请改用 Embeddings 模型",
+		},
+		{
+			name:    "empty user",
+			path:    "/chat/completions",
+			body:    `{"model":"inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":""}]}`,
+			code:    "invalid_user_message",
+			message: "用户消息不能为空，请输入内容后重试",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, changed, err := dropLingResponseFormat([]byte(tc.body), tc.path)
-			if err != nil || changed || string(out) != tc.body {
-				t.Fatalf("changed=%v err=%v out=%s", changed, err, out)
+			_, _, rejection, err := normalizeLingRequest([]byte(tc.body), tc.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rejection == nil || rejection.Code != tc.code || rejection.Message != tc.message {
+				t.Fatalf("rejection=%#v, want code=%q message=%q", rejection, tc.code, tc.message)
 			}
 		})
+	}
+}
+
+func TestNormalizeLingRequestLeavesOtherModelsUnchanged(t *testing.T) {
+	body := []byte(`{"model":"nvidia/other:free","messages":[],"reasoning_effort":"high","response_format":{"type":"json_object"}}`)
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil || rejection != nil || stats.Changed || string(out) != string(body) {
+		t.Fatalf("stats=%#v rejection=%#v err=%v out=%s", stats, rejection, err, out)
+	}
+}
+
+func TestNormalizeLingRequestDoesNotTreatToolTextAsMedia(t *testing.T) {
+	body := []byte(`{
+		"model":"inclusionai/ling-3.0-flash:free",
+		"messages":[
+			{"role":"user","content":"summarize the tool result"},
+			{"role":"tool","tool_call_id":"call_1","content":"{\"image_url\":\"metadata only\",\"type\":\"record\"}"}
+		]
+	}`)
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil || rejection != nil || stats.Changed || string(out) != string(body) {
+		t.Fatalf("stats=%#v rejection=%#v err=%v out=%s", stats, rejection, err, out)
+	}
+}
+
+func TestLingContextOverflowMessageIsChinese(t *testing.T) {
+	rejection := lingContextOverflowRejection()
+	if rejection.Code != "context_length_exceeded" || !strings.Contains(rejection.Message, "上下文长度已超限") {
+		t.Fatalf("unexpected rejection: %#v", rejection)
 	}
 }

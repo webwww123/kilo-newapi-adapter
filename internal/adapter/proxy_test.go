@@ -217,11 +217,11 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 }
 
-func TestProxyDropsResponseFormatForLingChatCompletions(t *testing.T) {
+func TestProxyNormalizesLingUnsupportedControls(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
 	handler := newTestHandler(upstream.URL)
-	body := `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"give data"}],"response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup"}}]}`
+	body := `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"give data"}],"reasoning_effort":"high","response_format":{"type":"json_object"},"max_tokens":4096,"tools":[{"type":"function","function":{"name":"lookup"}}]}`
 
 	rec := postJSON(t, handler, "/v1/chat/completions", body)
 	if rec.Code != http.StatusOK {
@@ -235,8 +235,66 @@ func TestProxyDropsResponseFormatForLingChatCompletions(t *testing.T) {
 	if _, exists := call.Body["response_format"]; exists {
 		t.Fatalf("response_format reached upstream: %#v", call.Body)
 	}
+	if _, exists := call.Body["reasoning_effort"]; exists {
+		t.Fatalf("reasoning_effort reached upstream: %#v", call.Body)
+	}
+	if call.Body["max_tokens"] != float64(4096) {
+		t.Fatalf("max_tokens changed: %#v", call.Body)
+	}
 	if len(call.Body["messages"].([]any)) != 1 || len(call.Body["tools"].([]any)) != 1 {
 		t.Fatalf("messages or tools changed: %#v", call.Body)
+	}
+}
+
+func TestProxyRejectsUnsupportedLingInputLocally(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "当前模型不支持图片输入") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("unsupported input reached upstream: %#v", *calls)
+	}
+}
+
+func TestProxyRejectsLingEmbeddingsLocally(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+
+	rec := postJSON(t, handler, "/v1/embeddings", `{"model":"kilo/inclusionai/ling-3.0-flash:free","input":"hello"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "当前模型不支持向量嵌入") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("embeddings request reached upstream: %#v", *calls)
+	}
+}
+
+func TestProxyRejectsLingContextThatCannotBeTrimmedSafely(t *testing.T) {
+	withContextTrimProfile(t, lingFlashFreeModel, contextTrimProfile{ContextLimit: 3000})
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+
+	body := fmt.Sprintf(`{
+		"model":"kilo/%s",
+		"messages":[
+			{"role":"system","content":"keep"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+			{"role":"user","content":%q}
+		],
+		"max_tokens":512
+	}`, lingFlashFreeModel, strings.Repeat("x", 12000))
+	rec := postJSON(t, handler, "/v1/chat/completions", body)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "上下文长度已超限") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("unsafe oversized context reached upstream: %#v", *calls)
 	}
 }
 

@@ -68,6 +68,13 @@ The trim policy keeps system/developer items, the originating user request, and 
 Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 
+Ling requests are normalized locally before they reach Kilo. Image, audio, video, and
+Embeddings requests return a direct Chinese compatibility error. Unsupported reasoning-effort
+and structured-output controls are removed while output-token limits remain intact. If an
+oversized tool or externally stateful request cannot be trimmed without breaking call/result
+pairing, the adapter returns a Chinese context-length error instead of forwarding stale or
+partial history.
+
 Kilo's provider pool for `stepfun/step-3.7-flash:free` inconsistently rejects OpenAI
 `response_format: {"type":"json_object"}` requests. For Chat Completions, the adapter
 therefore removes that upstream field and appends an equivalent JSON-only system instruction.

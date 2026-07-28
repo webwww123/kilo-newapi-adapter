@@ -67,6 +67,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleProxy(lw, r, "/responses", start)
 	case "/messages":
 		h.handleProxy(lw, r, "/messages", start)
+	case "/embeddings":
+		h.handleProxy(lw, r, "/embeddings", start)
 	default:
 		writeJSONError(lw, http.StatusNotFound, "not_found", "unsupported adapter path")
 		h.recordRequest(start, r, "", nil, responseLogCapture{
@@ -212,7 +214,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	body, responseFormatDropped, err := dropLingResponseFormat(body, upstreamPath)
+	body, lingStats, lingRejection, err := normalizeLingRequest(body, upstreamPath)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
@@ -221,8 +223,25 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		})
 		return
 	}
-	if responseFormatDropped {
-		fmt.Printf("kilo_response_format_drop path=%s model=%s\n", upstreamPath, lingFlashFreeModel)
+	if lingRejection != nil {
+		writeJSONError(w, http.StatusBadRequest, lingRejection.Code, lingRejection.Message)
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: lingRejection.Code,
+		})
+		return
+	}
+	if upstreamPath == "/embeddings" {
+		writeJSONError(w, http.StatusNotFound, "not_found", "unsupported adapter path")
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusNotFound,
+			adapterError: "unsupported adapter path",
+		})
+		return
+	}
+	if lingStats.Changed {
+		fmt.Printf("kilo_ling_compat path=%s reasoning_dropped=%t structured_output_dropped=%t\n",
+			upstreamPath, lingStats.ReasoningDropped, lingStats.StructuredOutputDropped)
 	}
 
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)
@@ -250,6 +269,24 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	if trimStats.changed() {
 		fmt.Printf("kilo_context_trim path=%s model=%s trimmed_items=%d truncated_items=%d output_clamped=%t\n",
 			upstreamPath, trimStats.Model, trimStats.TrimmedItems, trimStats.TruncatedItems, trimStats.OutputClamped)
+	}
+	stillTooLarge, err := lingRequestStillExceedsContextLimit(body, upstreamPath)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+	if stillTooLarge {
+		rejection := lingContextOverflowRejection()
+		writeJSONError(w, http.StatusBadRequest, rejection.Code, rejection.Message)
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: rejection.Code,
+		})
+		return
 	}
 
 	resp, err := h.forward(r, upstreamPath, bytes.NewReader(body))
