@@ -284,6 +284,6 @@ func lingUserContentIsEmpty(value any) bool {
 func lingContextOverflowRejection() lingRequestRejection {
 	return lingRequestRejection{
 		Code:    "context_length_exceeded",
-		Message: "当前模型上下文长度已超限，且本次请求无法安全裁剪，请缩短上下文后重试",
+		Message: "上下文长度超限，部分客户端中文计数可能不准确，可适当调低上下文窗口以便提前压缩。",
 	}
 }

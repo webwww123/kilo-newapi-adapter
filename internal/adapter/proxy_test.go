@@ -309,7 +309,7 @@ func TestProxyRejectsLingContextThatCannotBeTrimmedSafely(t *testing.T) {
 		"max_tokens":512
 	}`, lingFlashFreeModel, strings.Repeat("x", 12000))
 	rec := postJSON(t, handler, "/v1/chat/completions", body)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "上下文长度已超限") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "上下文长度超限，部分客户端中文计数可能不准确，可适当调低上下文窗口以便提前压缩。") {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(*calls) != 0 {

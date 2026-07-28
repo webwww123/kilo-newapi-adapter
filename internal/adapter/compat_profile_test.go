@@ -2,7 +2,6 @@ package adapter
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -182,9 +181,10 @@ func TestNormalizeLingRequestDoesNotTreatToolTextAsMedia(t *testing.T) {
 	}
 }
 
-func TestLingContextOverflowMessageIsChinese(t *testing.T) {
+func TestLingContextOverflowMessage(t *testing.T) {
 	rejection := lingContextOverflowRejection()
-	if rejection.Code != "context_length_exceeded" || !strings.Contains(rejection.Message, "上下文长度已超限") {
+	const wantMessage = "上下文长度超限，部分客户端中文计数可能不准确，可适当调低上下文窗口以便提前压缩。"
+	if rejection.Code != "context_length_exceeded" || rejection.Message != wantMessage {
 		t.Fatalf("unexpected rejection: %#v", rejection)
 	}
 }
