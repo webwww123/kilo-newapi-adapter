@@ -6,12 +6,16 @@ import (
 	"strings"
 )
 
-const lingFlashFreeModel = "inclusionai/ling-3.0-flash:free"
+const (
+	lingFlashFreeModel          = "inclusionai/ling-3.0-flash:free"
+	lingMaxExplicitOutputTokens = 32768
+)
 
 type lingNormalizationStats struct {
 	Changed                 bool
 	ReasoningDropped        bool
 	StructuredOutputDropped bool
+	OversizedOutputDropped  bool
 }
 
 type lingRequestRejection struct {
@@ -94,8 +98,11 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 	if deleteNestedLingField(payload, "output_config", "format") {
 		stats.StructuredOutputDropped = true
 	}
+	if dropLingOversizedOutputLimits(payload) {
+		stats.OversizedOutputDropped = true
+	}
 
-	stats.Changed = stats.ReasoningDropped || stats.StructuredOutputDropped
+	stats.Changed = stats.ReasoningDropped || stats.StructuredOutputDropped || stats.OversizedOutputDropped
 	if !stats.Changed {
 		return body, stats, nil, nil
 	}
@@ -104,6 +111,19 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 		return nil, stats, nil, fmt.Errorf("encode Ling request cleanup: %w", err)
 	}
 	return out, stats, nil, nil
+}
+
+func dropLingOversizedOutputLimits(payload map[string]any) bool {
+	dropped := false
+	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		limit, ok := payload[key].(float64)
+		if !ok || limit <= lingMaxExplicitOutputTokens {
+			continue
+		}
+		delete(payload, key)
+		dropped = true
+	}
+	return dropped
 }
 
 func deleteNestedLingField(payload map[string]any, containerKey, fieldKey string) bool {

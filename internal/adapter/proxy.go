@@ -240,8 +240,8 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 	if lingStats.Changed {
-		fmt.Printf("kilo_ling_compat path=%s reasoning_dropped=%t structured_output_dropped=%t\n",
-			upstreamPath, lingStats.ReasoningDropped, lingStats.StructuredOutputDropped)
+		fmt.Printf("kilo_ling_compat path=%s reasoning_dropped=%t structured_output_dropped=%t oversized_output_dropped=%t\n",
+			upstreamPath, lingStats.ReasoningDropped, lingStats.StructuredOutputDropped, lingStats.OversizedOutputDropped)
 	}
 
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)

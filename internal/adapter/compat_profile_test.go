@@ -64,6 +64,44 @@ func TestNormalizeLingRequestDropsUnsupportedControls(t *testing.T) {
 	}
 }
 
+func TestNormalizeLingRequestDropsOnlyOversizedOutputLimits(t *testing.T) {
+	body := []byte(`{
+		"model":"inclusionai/ling-3.0-flash:free",
+		"messages":[{"role":"user","content":"hello"}],
+		"max_tokens":32768,
+		"max_completion_tokens":32769,
+		"max_output_tokens":131072,
+		"temperature":0.2
+	}`)
+
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection != nil {
+		t.Fatalf("request was rejected: %#v", rejection)
+	}
+	if !stats.Changed || !stats.OversizedOutputDropped {
+		t.Fatalf("oversized output limits were not reported as dropped: %#v", stats)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["max_tokens"] != float64(32768) {
+		t.Fatalf("valid max_tokens changed: %#v", payload)
+	}
+	for _, key := range []string{"max_completion_tokens", "max_output_tokens"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("oversized %s still present: %#v", key, payload)
+		}
+	}
+	if payload["temperature"] != float64(0.2) {
+		t.Fatalf("unrelated field changed: %#v", payload)
+	}
+}
+
 func TestNormalizeLingRequestRejectsUnsupportedInputsInChinese(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -123,7 +161,7 @@ func TestNormalizeLingRequestRejectsUnsupportedInputsInChinese(t *testing.T) {
 }
 
 func TestNormalizeLingRequestLeavesOtherModelsUnchanged(t *testing.T) {
-	body := []byte(`{"model":"nvidia/other:free","messages":[],"reasoning_effort":"high","response_format":{"type":"json_object"}}`)
+	body := []byte(`{"model":"nvidia/other:free","messages":[],"reasoning_effort":"high","response_format":{"type":"json_object"},"max_tokens":64000}`)
 	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
 	if err != nil || rejection != nil || stats.Changed || string(out) != string(body) {
 		t.Fatalf("stats=%#v rejection=%#v err=%v out=%s", stats, rejection, err, out)
