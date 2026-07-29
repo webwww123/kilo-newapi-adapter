@@ -59,6 +59,13 @@ REQUEST_LOG_BODY_LIMIT=1048576
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
 
+## Public Error Policy
+
+- Every client-visible 4xx response is collapsed to HTTP 400 with `400 请求无法处理，请检查请求参数或稍后重试。`.
+- Every client-visible 5xx response is collapsed to HTTP 500 with `500 请求无法处理，请检查请求参数或稍后重试。`.
+- HTTP 200 error envelopes and SSE error events use the same generic 500 message.
+- Original adapter and upstream error details remain in the root-only request log for internal debugging and are never returned to clients.
+
 ## Free Model Context Trimming
 
 Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
@@ -69,13 +76,13 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 
 Ling requests are normalized locally before they reach Kilo. Image, audio, video, and
-Embeddings requests return a direct Chinese compatibility error. Unsupported reasoning-effort
+Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
 and structured-output controls are removed. Explicit `max_tokens`, `max_completion_tokens`,
 and `max_output_tokens` values up to 32768 are preserved; larger values are removed so Kilo can
 apply its model/provider default instead of returning a generic upstream 400. If an oversized
 tool or externally stateful request cannot be trimmed without breaking call/result pairing,
-the adapter returns a Chinese context-length error instead of forwarding stale or partial
-history.
+the adapter rejects it locally instead of forwarding stale or partial history; the detailed
+reason remains available in the internal request log.
 
 Kilo's provider pool for `stepfun/step-3.7-flash:free` inconsistently rejects OpenAI
 `response_format: {"type":"json_object"}` requests. For Chat Completions, the adapter

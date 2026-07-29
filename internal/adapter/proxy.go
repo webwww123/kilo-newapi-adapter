@@ -8,16 +8,15 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	publicModelPrefix            = "kilo/"
-	signInModelErrorMessage      = "You need to sign in to use this model."
-	modelMaintenanceErrorMessage = "此模型正在维护很快恢复"
+	publicModelPrefix        = "kilo/"
+	publicClientErrorMessage = "400 请求无法处理，请检查请求参数或稍后重试。"
+	publicServerErrorMessage = "500 请求无法处理，请检查请求参数或稍后重试。"
 )
 
 type Handler struct {
@@ -145,23 +144,32 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start tim
 		})
 		return
 	}
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body = prefixModelsResponse(body)
-	} else {
-		body = redactProviderName(body)
-	}
-
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Del("Content-Length")
-	w.WriteHeader(resp.StatusCode)
-	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
-	_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(body), capture))
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		body = prefixModelsResponse(body)
+		w.WriteHeader(resp.StatusCode)
+		capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+		_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(body), capture))
+		h.recordRequest(start, r, "/models", nil, responseLogCapture{
+			status:        resp.StatusCode,
+			bytesWritten:  capture.Total(),
+			contentType:   resp.Header.Get("Content-Type"),
+			body:          capture.Bytes(),
+			bodyTruncated: capture.Truncated(),
+		})
+		return
+	}
+
+	rawCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+	_, _ = rawCapture.Write(body)
+	writePublicErrorResponse(w, resp.StatusCode, "/models")
 	h.recordRequest(start, r, "/models", nil, responseLogCapture{
 		status:        resp.StatusCode,
-		bytesWritten:  capture.Total(),
+		bytesWritten:  rawCapture.Total(),
 		contentType:   resp.Header.Get("Content-Type"),
-		body:          capture.Bytes(),
-		bodyTruncated: capture.Truncated(),
+		body:          rawCapture.Bytes(),
+		bodyTruncated: rawCapture.Truncated(),
 	})
 }
 
@@ -302,27 +310,6 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 
 	copyResponseHeaders(w.Header(), resp.Header)
 	w.Header().Set("Cache-Control", "no-store")
-	if resp.StatusCode == http.StatusTooManyRequests {
-		responseBody, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream response read failed")
-			h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
-				status:        http.StatusBadGateway,
-				upstreamError: readErr.Error(),
-			})
-			return
-		}
-		sanitized := sanitizeUpstreamErrorBody(body, responseBody)
-		w.Header().Del("Content-Length")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(sanitized)
-		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
-			status:      resp.StatusCode,
-			contentType: resp.Header.Get("Content-Type"),
-			body:        sanitized,
-		})
-		return
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
@@ -333,56 +320,67 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			})
 			return
 		}
-		sanitized := sanitizeUpstreamErrorBody(body, responseBody)
-		w.Header().Del("Content-Length")
-		w.WriteHeader(resp.StatusCode)
-		_, _ = w.Write(sanitized)
+		rawCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+		_, _ = rawCapture.Write(responseBody)
+		writePublicErrorResponse(w, resp.StatusCode, upstreamPath)
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
-			status:      resp.StatusCode,
-			contentType: resp.Header.Get("Content-Type"),
-			body:        sanitized,
+			status:        resp.StatusCode,
+			bytesWritten:  rawCapture.Total(),
+			contentType:   resp.Header.Get("Content-Type"),
+			body:          rawCapture.Bytes(),
+			bodyTruncated: rawCapture.Truncated(),
 		})
 		return
 	}
 
-	capture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
+	logCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 	w.Header().Del("Content-Length")
 	responseStatus := resp.StatusCode
 	if isEventStreamResponse(resp.Header) {
 		w.WriteHeader(responseStatus)
-		copyEventStreamWithNormalizeAndCapture(w, resp.Body, capture, publicRequestModel, upstreamPath)
+		if copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath) {
+			responseStatus = http.StatusInternalServerError
+		}
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
-			responseStatus = http.StatusBadGateway
+			responseStatus = http.StatusInternalServerError
 			responseBody = publicUpstreamErrorBody(upstreamPath)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(responseStatus)
-			_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
+			_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), logCapture))
 			fmt.Printf("upstream_success_read_error=%v\n", readErr)
 			h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
 				status:        responseStatus,
-				bytesWritten:  capture.Total(),
+				bytesWritten:  logCapture.Total(),
 				contentType:   "application/json",
-				body:          capture.Bytes(),
-				bodyTruncated: capture.Truncated(),
+				body:          logCapture.Bytes(),
+				bodyTruncated: logCapture.Truncated(),
 				upstreamError: readErr.Error(),
 			})
 			return
 		}
+		rawResponseBody := responseBody
 		var validSuccess bool
 		responseBody, validSuccess = normalizeSuccessResponseBodyChecked(responseBody, publicRequestModel, upstreamPath, false)
 		if !validSuccess {
-			responseStatus = http.StatusBadGateway
+			responseStatus = http.StatusInternalServerError
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = logCapture.Write(rawResponseBody)
 		}
 		w.WriteHeader(responseStatus)
-		_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), capture))
+		if validSuccess {
+			_, _ = io.Copy(w, io.TeeReader(bytes.NewReader(responseBody), logCapture))
+		} else {
+			_, _ = w.Write(responseBody)
+		}
 	}
 	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
 		status:        responseStatus,
-		bytesWritten:  capture.Total(),
+		bytesWritten:  logCapture.Total(),
 		contentType:   resp.Header.Get("Content-Type"),
-		body:          capture.Bytes(),
-		bodyTruncated: capture.Truncated(),
+		body:          logCapture.Bytes(),
+		bodyTruncated: logCapture.Truncated(),
 	})
 }
 
@@ -428,50 +426,6 @@ func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath s
 	if err != nil {
 		fmt.Printf("request_log_error=%v\n", err)
 	}
-}
-
-var (
-	rateLimitIdentifierPattern      = regexp.MustCompile(`\blimit_[A-Za-z0-9_-]+(?:\\?/[A-Za-z0-9_.:-]+){2,4}\b`)
-	providerNameFieldPattern        = regexp.MustCompile(`("provider_name"\s*:\s*")[^"]*(")`)
-	escapedProviderNameFieldPattern = regexp.MustCompile(`(\\"provider_name\\"\s*:\s*\\")[^\\"\\\\]*(\\")`)
-)
-
-func sanitizeRateLimitModelLeak(requestBody []byte, responseBody []byte) []byte {
-	model := strings.TrimSpace(extractModel(requestBody))
-	if model == "" || len(responseBody) == 0 {
-		return responseBody
-	}
-	sanitized := rateLimitIdentifierPattern.ReplaceAll(responseBody, []byte("<RATE_LIMIT_ID>"))
-	sanitized = bytes.ReplaceAll(sanitized, []byte(prefixPublicModel(model)), []byte("<UPSTREAM_MODEL>"))
-	sanitized = bytes.ReplaceAll(sanitized, []byte(model), []byte("<UPSTREAM_MODEL>"))
-	escapedModel := strings.ReplaceAll(model, "/", `\/`)
-	if escapedModel != model {
-		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedModel), []byte("<UPSTREAM_MODEL>"))
-	}
-	escapedPublicModel := strings.ReplaceAll(prefixPublicModel(model), "/", `\/`)
-	if escapedPublicModel != prefixPublicModel(model) {
-		sanitized = bytes.ReplaceAll(sanitized, []byte(escapedPublicModel), []byte("<UPSTREAM_MODEL>"))
-	}
-	return sanitized
-}
-
-func sanitizeUpstreamErrorBody(requestBody []byte, responseBody []byte) []byte {
-	sanitized := sanitizeRateLimitModelLeak(requestBody, responseBody)
-	sanitized = redactProviderName(sanitized)
-	return normalizeSignInModelError(sanitized)
-}
-
-func normalizeSignInModelError(body []byte) []byte {
-	if !bytes.Contains(body, []byte(signInModelErrorMessage)) {
-		return body
-	}
-	return []byte(`{"error":{"message":"` + modelMaintenanceErrorMessage + `","type":"model_maintenance","code":104}}`)
-}
-
-func redactProviderName(body []byte) []byte {
-	redacted := providerNameFieldPattern.ReplaceAll(body, []byte(`${1}<redacted>${2}`))
-	redacted = escapedProviderNameFieldPattern.ReplaceAll(redacted, []byte(`${1}<redacted>${2}`))
-	return redacted
 }
 
 func validateJSONBody(body []byte) ([]byte, error) {
@@ -709,11 +663,67 @@ func meaningfulErrorValue(value any) bool {
 	}
 }
 
-func publicUpstreamErrorBody(upstreamPath string) []byte {
-	if upstreamPath == "/messages" {
-		return []byte(`{"type":"error","error":{"type":"api_error","message":"upstream request failed"}}`)
+func normalizePublicErrorStatus(status int) int {
+	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
+		return http.StatusBadRequest
 	}
-	return []byte(`{"error":{"message":"upstream request failed","type":"upstream_error","code":"upstream_error"}}`)
+	return http.StatusInternalServerError
+}
+
+func publicErrorMessage(status int) string {
+	if normalizePublicErrorStatus(status) == http.StatusBadRequest {
+		return publicClientErrorMessage
+	}
+	return publicServerErrorMessage
+}
+
+func publicErrorBody(upstreamPath string, status int) []byte {
+	publicStatus := normalizePublicErrorStatus(status)
+	message := publicErrorMessage(publicStatus)
+	if upstreamPath == "/messages" {
+		errorType := "invalid_request_error"
+		if publicStatus == http.StatusInternalServerError {
+			errorType = "api_error"
+		}
+		body, _ := json.Marshal(map[string]any{
+			"type": "error",
+			"error": map[string]any{
+				"type":    errorType,
+				"message": message,
+			},
+		})
+		return body
+	}
+
+	errorType := "invalid_request_error"
+	if publicStatus == http.StatusInternalServerError {
+		errorType = "server_error"
+	}
+	body, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message": message,
+			"type":    errorType,
+			"code":    publicStatus,
+		},
+	})
+	return body
+}
+
+func writePublicErrorResponse(w http.ResponseWriter, status int, upstreamPath string) {
+	publicStatus := normalizePublicErrorStatus(status)
+	body := publicErrorBody(upstreamPath, publicStatus)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Del("Content-Length")
+	w.Header().Del("Content-Encoding")
+	w.Header().Del("ETag")
+	w.Header().Del("Content-MD5")
+	w.WriteHeader(publicStatus)
+	_, _ = w.Write(body)
+}
+
+func publicUpstreamErrorBody(upstreamPath string) []byte {
+	return publicErrorBody(upstreamPath, http.StatusInternalServerError)
 }
 
 func normalizeSuccessFieldName(key string) string {
@@ -754,43 +764,49 @@ func isEventStreamResponse(header http.Header) bool {
 	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/event-stream")
 }
 
-func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) {
+func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) bool {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(r)
+	hadError := false
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			chunk := normalizeEventStreamLine(line, publicModel, upstreamPath)
+			chunk, chunkHadError := normalizeEventStreamLine(line, publicModel, upstreamPath)
 			if capture != nil {
-				_, _ = capture.Write(chunk)
+				if chunkHadError {
+					_, _ = capture.Write(line)
+				} else {
+					_, _ = capture.Write(chunk)
+				}
 			}
+			hadError = hadError || chunkHadError
 			_, _ = w.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			return
+			return hadError
 		}
 	}
 }
 
-func normalizeEventStreamLine(line []byte, publicModel string, upstreamPath string) []byte {
+func normalizeEventStreamLine(line []byte, publicModel string, upstreamPath string) ([]byte, bool) {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	lineEnding := line[len(trimmed):]
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
-		return line
+		return line, false
 	}
 	data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
 	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-		return line
+		return line, false
 	}
-	normalized := normalizeSuccessResponseBody(data, publicModel, upstreamPath, true)
+	normalized, validSuccess := normalizeSuccessResponseBodyChecked(data, publicModel, upstreamPath, true)
 	output := make([]byte, 0, len("data: ")+len(normalized)+len(lineEnding))
 	output = append(output, "data: "...)
 	output = append(output, normalized...)
 	output = append(output, lineEnding...)
-	return output
+	return output, !validSuccess
 }
 
 func (h *Handler) forward(original *http.Request, upstreamPath string, body io.Reader) (*http.Response, error) {
@@ -973,14 +989,8 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-func writeJSONError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{
-		"error": map[string]any{
-			"message": message,
-			"type":    code,
-			"code":    code,
-		},
-	})
+func writeJSONError(w http.ResponseWriter, status int, _ string, _ string) {
+	writePublicErrorResponse(w, status, "")
 }
 
 type loggingResponseWriter struct {

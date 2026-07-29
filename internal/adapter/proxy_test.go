@@ -167,6 +167,9 @@ func TestProxyRejectsMissingOrInvalidModelLocally(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), `"type":"invalid_request_error"`) {
 				t.Fatalf("unexpected error body: %s", rec.Body.String())
 			}
+			if !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
+				t.Fatalf("generic client error missing: %s", rec.Body.String())
+			}
 		})
 	}
 
@@ -271,7 +274,7 @@ func TestProxyRejectsUnsupportedLingInputLocally(t *testing.T) {
 	handler := newTestHandler(upstream.URL)
 
 	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "当前模型不支持图片输入") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(*calls) != 0 {
@@ -285,7 +288,7 @@ func TestProxyRejectsLingEmbeddingsLocally(t *testing.T) {
 	handler := newTestHandler(upstream.URL)
 
 	rec := postJSON(t, handler, "/v1/embeddings", `{"model":"kilo/inclusionai/ling-3.0-flash:free","input":"hello"}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "当前模型不支持向量嵌入") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(*calls) != 0 {
@@ -309,7 +312,7 @@ func TestProxyRejectsLingContextThatCannotBeTrimmedSafely(t *testing.T) {
 		"max_tokens":512
 	}`, lingFlashFreeModel, strings.Repeat("x", 12000))
 	rec := postJSON(t, handler, "/v1/chat/completions", body)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "上下文长度超限，部分客户端中文计数可能不准确，可适当调低上下文窗口以便提前压缩。") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if len(*calls) != 0 {
@@ -387,6 +390,43 @@ func TestModelsPrefixesNestedModelReferencesForPublicListing(t *testing.T) {
 	}
 }
 
+func TestModelsErrorsUseGenericPublicMessages(t *testing.T) {
+	tests := []struct {
+		upstreamStatus int
+		wantStatus     int
+		wantMessage    string
+	}{
+		{upstreamStatus: http.StatusNotFound, wantStatus: http.StatusBadRequest, wantMessage: publicClientErrorMessage},
+		{upstreamStatus: http.StatusServiceUnavailable, wantStatus: http.StatusInternalServerError, wantMessage: publicServerErrorMessage},
+	}
+
+	for _, tc := range tests {
+		t.Run(http.StatusText(tc.upstreamStatus), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.upstreamStatus)
+				_, _ = io.WriteString(w, `{"error":{"message":"InternalProvider model inventory failed"}}`)
+			}))
+			defer upstream.Close()
+
+			handler := newTestHandler(upstream.URL)
+			req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantMessage) {
+				t.Fatalf("generic public message missing: %s", rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "InternalProvider") {
+				t.Fatalf("models error leaked upstream detail: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestProxyPrefixesSuccessResponseModelAndRemovesProvider(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -411,7 +451,7 @@ func TestProxyPrefixesSuccessResponseModelAndRemovesProvider(t *testing.T) {
 	}
 }
 
-func TestProxyReturnsBadGatewayForHTTP200ErrorPayloads(t *testing.T) {
+func TestProxyReturnsServerErrorForHTTP200ErrorPayloads(t *testing.T) {
 	tests := []struct {
 		name         string
 		path         string
@@ -454,10 +494,10 @@ func TestProxyReturnsBadGatewayForHTTP200ErrorPayloads(t *testing.T) {
 			handler := newTestHandler(upstream.URL)
 			rec := postJSON(t, handler, tc.path, tc.requestBody)
 
-			if rec.Code != http.StatusBadGateway {
-				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadGateway, rec.Body.String())
+			if rec.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusInternalServerError, rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), "upstream request failed") {
+			if !strings.Contains(rec.Body.String(), publicServerErrorMessage) {
 				t.Fatalf("generic upstream error missing: %s", rec.Body.String())
 			}
 			if strings.Contains(rec.Body.String(), tc.leaked) {
@@ -684,171 +724,88 @@ func TestProxyFailsClosedForSSEErrorAndNonJSONData(t *testing.T) {
 			if len(payloads) != 2 {
 				t.Fatalf("sanitized SSE payloads = %d, want 2: %s", len(payloads), rec.Body.String())
 			}
-			if !strings.Contains(rec.Body.String(), "upstream request failed") {
+			if !strings.Contains(rec.Body.String(), publicServerErrorMessage) {
 				t.Fatalf("sanitized SSE error missing generic message: %s", rec.Body.String())
 			}
 		})
 	}
 }
 
-func TestProxySanitizesRateLimitModelLeak(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded for poolside/laguna-xs-2.1:free via https://api.kilo.ai/path","code":429,"metadata":{"raw":"poolside/laguna-xs-2.1:free is temporarily rate-limited upstream","provider_name":"Poolside"}},"user_id":"org_2uwFc1szZKyZweUX7pX97kXQf2O"}`))
-	}))
-	defer upstream.Close()
+func TestProxyReturnsGenericPublicErrorsAcrossProtocols(t *testing.T) {
+	tests := []struct {
+		name           string
+		path           string
+		requestBody    string
+		upstreamStatus int
+		wantStatus     int
+		wantMessage    string
+	}{
+		{
+			name:           "chat upstream 429 becomes 400",
+			path:           "/v1/chat/completions",
+			requestBody:    `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}]}`,
+			upstreamStatus: http.StatusTooManyRequests,
+			wantStatus:     http.StatusBadRequest,
+			wantMessage:    publicClientErrorMessage,
+		},
+		{
+			name:           "messages upstream 401 becomes 400",
+			path:           "/v1/messages",
+			requestBody:    `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`,
+			upstreamStatus: http.StatusUnauthorized,
+			wantStatus:     http.StatusBadRequest,
+			wantMessage:    publicClientErrorMessage,
+		},
+		{
+			name:           "responses upstream 503 becomes 500",
+			path:           "/v1/responses",
+			requestBody:    `{"model":"kilo/public-model","input":"hi"}`,
+			upstreamStatus: http.StatusServiceUnavailable,
+			wantStatus:     http.StatusInternalServerError,
+			wantMessage:    publicServerErrorMessage,
+		},
+	}
 
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs-2.1:free","messages":[{"role":"user","content":"hi"}]}`)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.upstreamStatus)
+				_, _ = io.WriteString(w, `{"error":{"message":"InternalProvider failed for real/upstream-model","metadata":{"raw":"trace_id=internal-trace"}}}`)
+			}))
+			defer upstream.Close()
 
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			handler := newTestHandler(upstream.URL)
+			rec := postJSON(t, handler, tc.path, tc.requestBody)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantMessage) {
+				t.Fatalf("generic public message missing: %s", rec.Body.String())
+			}
+			for _, leaked := range []string{"InternalProvider", "real/upstream-model", "internal-trace", "metadata", "raw"} {
+				if strings.Contains(rec.Body.String(), leaked) {
+					t.Fatalf("public error leaked %q: %s", leaked, rec.Body.String())
+				}
+			}
+		})
 	}
-	body := rec.Body.String()
-	if strings.Contains(body, "poolside/laguna-xs-2.1:free") {
-		t.Fatalf("rate-limit error leaked upstream model in body: %s", body)
+}
+
+func TestNormalizePublicErrorStatus(t *testing.T) {
+	tests := map[int]int{
+		http.StatusBadRequest:          http.StatusBadRequest,
+		http.StatusUnauthorized:        http.StatusBadRequest,
+		http.StatusTooManyRequests:     http.StatusBadRequest,
+		http.StatusInternalServerError: http.StatusInternalServerError,
+		http.StatusBadGateway:          http.StatusInternalServerError,
+		http.StatusServiceUnavailable:  http.StatusInternalServerError,
+		http.StatusFound:               http.StatusInternalServerError,
 	}
-	if strings.Count(body, "<UPSTREAM_MODEL>") != 2 {
-		t.Fatalf("sanitized model marker count mismatch in body: %s", body)
-	}
-	if strings.Contains(body, "Poolside") {
-		t.Fatalf("rate-limit error leaked provider_name in body: %s", body)
-	}
-	if !strings.Contains(body, `"provider_name":"<redacted>"`) {
-		t.Fatalf("provider_name was not redacted: %s", body)
-	}
-	for _, unchanged := range []string{"org_2uwFc1szZKyZweUX7pX97kXQf2O", "https://api.kilo.ai/path"} {
-		if !strings.Contains(body, unchanged) {
-			t.Fatalf("rate-limit sanitizer should not rewrite %q in body: %s", unchanged, body)
+	for input, want := range tests {
+		if got := normalizePublicErrorStatus(input); got != want {
+			t.Fatalf("normalizePublicErrorStatus(%d) = %d, want %d", input, got, want)
 		}
-	}
-}
-
-func TestProxyRedactsProviderNameInUpstreamErrors(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"Provider returned error ({\"raw\":\"{\\\"error\\\":{\\\"message\\\":\\\"Unrecognized chat message.\\\",\\\"type\\\":\\\"request_params_invalid\\\"}}\",\"provider_name\":\"StepFun\",\"is_byok\":true})","type":"request_params_invalid"},"provider_name":"StepFun"}`))
-	}))
-	defer upstream.Close()
-
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","messages":[{"role":"user","content":"hi"}]}`)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if strings.Contains(body, "StepFun") {
-		t.Fatalf("provider_name leaked in response body: %s", body)
-	}
-	if !strings.Contains(body, `"provider_name":"<redacted>"`) {
-		t.Fatalf("provider_name was not redacted: %s", body)
-	}
-}
-
-func TestProxyRedactsUpstreamModelInNonRateLimitErrors(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"nvidia/nemotron-3-super-120b-a12b:free is not a valid model ID","code":400}}`))
-	}))
-	defer upstream.Close()
-
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/nvidia/nemotron-3-super-120b-a12b:free","messages":[{"role":"user","content":"hi"}]}`)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if strings.Contains(body, "nvidia/nemotron-3-super-120b-a12b:free") {
-		t.Fatalf("non-rate-limit error leaked upstream model in body: %s", body)
-	}
-	if strings.Contains(body, "kilo/nvidia/nemotron-3-super-120b-a12b:free") {
-		t.Fatalf("non-rate-limit error leaked public model in body: %s", body)
-	}
-	if !strings.Contains(body, "<UPSTREAM_MODEL> is not a valid model ID") {
-		t.Fatalf("non-rate-limit error did not redact model marker: %s", body)
-	}
-}
-
-func TestProxyNormalizesSignInModelErrors(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":{"message":"You need to sign in to use this model.","code":401,"metadata":{"provider_name":"OpenAI","model":"openai/gpt-4.1:free"}}}`))
-	}))
-	defer upstream.Close()
-
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/openai/gpt-4.1:free","messages":[{"role":"user","content":"hi"}]}`)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if !strings.Contains(body, `"message":"此模型正在维护很快恢复"`) {
-		t.Fatalf("sign-in model error message was not normalized: %s", body)
-	}
-	if !strings.Contains(body, `"code":104`) {
-		t.Fatalf("sign-in model error code was not normalized: %s", body)
-	}
-	for _, leaked := range []string{"You need to sign in to use this model.", "openai/gpt-4.1:free", "kilo/openai/gpt-4.1:free", "OpenAI"} {
-		if strings.Contains(body, leaked) {
-			t.Fatalf("sign-in model error leaked %q in body: %s", leaked, body)
-		}
-	}
-}
-
-func TestProxySanitizesRateLimitIdentifierModelLeak(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":{"message":"Rate limit exceeded: limit_rpm/cohere/north-mini-code-20260617/d3a18412-b833-40de-bc07-c4ba9a1dea53. High demand for cohere/north-mini-code:free on OpenRouter - limited to 15 requests per minute.","code":429}}`))
-	}))
-	defer upstream.Close()
-
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/cohere/north-mini-code:free","messages":[{"role":"user","content":"hi"}]}`)
-
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	for _, leaked := range []string{"cohere/north-mini-code:free", "limit_rpm/cohere/north-mini-code-20260617/d3a18412-b833-40de-bc07-c4ba9a1dea53", "cohere/north-mini-code-20260617"} {
-		if strings.Contains(body, leaked) {
-			t.Fatalf("rate-limit error leaked model identifier %q in body: %s", leaked, body)
-		}
-	}
-	for _, marker := range []string{"<RATE_LIMIT_ID>", "<UPSTREAM_MODEL>"} {
-		if !strings.Contains(body, marker) {
-			t.Fatalf("sanitized error missing marker %q in body: %s", marker, body)
-		}
-	}
-}
-
-func TestProxySanitizesModelLeakOutsideRateLimit(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"message":"Bad request for poolside/laguna-xs-2.1:free","code":400}}`))
-	}))
-	defer upstream.Close()
-
-	handler := newTestHandler(upstream.URL)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-xs-2.1:free","messages":[{"role":"user","content":"hi"}]}`)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	body := rec.Body.String()
-	if strings.Contains(body, "poolside/laguna-xs-2.1:free") {
-		t.Fatalf("non-rate-limit error leaked upstream model in body: %s", body)
-	}
-	if !strings.Contains(body, "Bad request for <UPSTREAM_MODEL>") {
-		t.Fatalf("non-rate-limit error did not redact model marker: %s", body)
 	}
 }
 

@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,66 @@ func TestRequestLoggerRecordsProxiedRequestAndResponse(t *testing.T) {
 	}
 	if !strings.Contains(entry.Response.Body, `"ok":true`) {
 		t.Fatalf("response body not recorded: %q", entry.Response.Body)
+	}
+}
+
+func TestRequestLoggerPreservesOriginalErrorWhenPublicResponseIsGeneric(t *testing.T) {
+	const rawMarker = "model ling-3.0-flash: target label not found"
+	const upstreamBody = `{"error":{"message":"Provider returned error","metadata":{"raw":"{\"message\":\"model ling-3.0-flash: target label not found trace_id: internal-trace\"}","provider_name":"InternalProvider","previous_errors":[{"code":429,"raw":"server overload"}]}}}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	logDir := t.TempDir()
+	handler := NewHandler(Config{
+		UpstreamBaseURL:     upstream.URL,
+		RequestLogDir:       logDir,
+		RequestLogRetention: 48 * time.Hour,
+		RequestLogBodyLimit: 2048,
+	})
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
+		t.Fatalf("generic client error missing: %s", rec.Body.String())
+	}
+	for _, leaked := range []string{rawMarker, "InternalProvider", "internal-trace", "previous_errors", "raw"} {
+		if strings.Contains(rec.Body.String(), leaked) {
+			t.Fatalf("public response leaked %q: %s", leaked, rec.Body.String())
+		}
+	}
+
+	files, err := filepath.Glob(filepath.Join(logDir, "requests-*.jsonl"))
+	if err != nil {
+		t.Fatalf("glob logs: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("log files = %v, want one request log", files)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read request log: %v", err)
+	}
+	var entry requestLogEntry
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &entry); err != nil {
+		t.Fatalf("decode request log: %v", err)
+	}
+	if entry.Status != http.StatusBadRequest {
+		t.Fatalf("internal log status = %d, want %d", entry.Status, http.StatusBadRequest)
+	}
+	for _, detail := range []string{rawMarker, "InternalProvider", "internal-trace", "previous_errors", "server overload"} {
+		if !strings.Contains(entry.Response.Body, detail) {
+			t.Fatalf("internal log lost %q: %s", detail, entry.Response.Body)
+		}
+	}
+	if strings.Contains(entry.Response.Body, publicClientErrorMessage) {
+		t.Fatalf("internal log stored only the public error: %s", entry.Response.Body)
 	}
 }
 
