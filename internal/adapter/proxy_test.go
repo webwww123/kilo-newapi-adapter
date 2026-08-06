@@ -220,11 +220,11 @@ func TestProxySanitizesClientHeadersAndAddsUpstreamAuth(t *testing.T) {
 	}
 }
 
-func TestProxyNormalizesLingUnsupportedControls(t *testing.T) {
+func TestProxyNormalizesLingUnsupportedReasoningControl(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
 	handler := newTestHandler(upstream.URL)
-	body := `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"give data"}],"reasoning_effort":"high","response_format":{"type":"json_object"},"max_tokens":4096,"tools":[{"type":"function","function":{"name":"lookup"}}]}`
+	body := `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"give data"}],"reasoning_effort":"high","max_tokens":4096}`
 
 	rec := postJSON(t, handler, "/v1/chat/completions", body)
 	if rec.Code != http.StatusOK {
@@ -235,17 +235,14 @@ func TestProxyNormalizesLingUnsupportedControls(t *testing.T) {
 	}
 
 	call := (*calls)[0]
-	if _, exists := call.Body["response_format"]; exists {
-		t.Fatalf("response_format reached upstream: %#v", call.Body)
-	}
 	if _, exists := call.Body["reasoning_effort"]; exists {
 		t.Fatalf("reasoning_effort reached upstream: %#v", call.Body)
 	}
 	if call.Body["max_tokens"] != float64(4096) {
 		t.Fatalf("max_tokens changed: %#v", call.Body)
 	}
-	if len(call.Body["messages"].([]any)) != 1 || len(call.Body["tools"].([]any)) != 1 {
-		t.Fatalf("messages or tools changed: %#v", call.Body)
+	if len(call.Body["messages"].([]any)) != 1 {
+		t.Fatalf("messages changed: %#v", call.Body)
 	}
 }
 

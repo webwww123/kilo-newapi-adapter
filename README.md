@@ -77,7 +77,11 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 
 Ling requests are normalized locally before they reach Kilo. Image, audio, video, and
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
-and structured-output controls are removed. Explicit `max_tokens`, `max_completion_tokens`,
+controls are removed. Chat Completions `json_object` and strict `json_schema` requests are captured before
+the upstream cleanup step and emulated in-process only for Ling: the adapter validates the completed object,
+repairs an invalid or empty first answer once, and buffers client streaming until validation succeeds.
+Requests combining tools with `response_format` are rejected locally; ordinary tools and requests without
+`response_format` stay on the existing path. Explicit `max_tokens`, `max_completion_tokens`,
 and `max_output_tokens` values up to 32768 are preserved; larger values are removed so Kilo can
 apply its model/provider default instead of returning a generic upstream 400. If an oversized
 tool or externally stateful request cannot be trimmed without breaking call/result pairing,

@@ -37,7 +37,8 @@ func NewHandler(cfg Config) http.Handler {
 			fmt.Printf("request_log_cleanup_error=%v\n", err)
 		}
 	}
-	return &Handler{cfg: cfg, logger: logger}
+	base := &Handler{cfg: cfg, logger: logger}
+	return newLingJSONCompatHandler(base, cfg.MaxBodyBytes)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -183,14 +184,18 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	body, err := readLimited(r.Body, h.cfg.MaxBodyBytes)
-	if err != nil {
-		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		h.recordRequest(start, r, upstreamPath, nil, responseLogCapture{
-			status:       http.StatusBadRequest,
-			adapterError: err.Error(),
-		})
-		return
+	body, preloaded := lingJSONPreloadedBody(r)
+	var err error
+	if !preloaded {
+		body, err = readLimited(r.Body, h.cfg.MaxBodyBytes)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			h.recordRequest(start, r, upstreamPath, nil, responseLogCapture{
+				status:       http.StatusBadRequest,
+				adapterError: err.Error(),
+			})
+			return
+		}
 	}
 
 	body, err = validateJSONBody(body)
