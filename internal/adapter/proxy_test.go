@@ -269,6 +269,20 @@ func TestProxyDropsOversizedLingOutputLimit(t *testing.T) {
 	}
 }
 
+func TestProxyRaisesLingTinyLowOutputLimit(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":"hello"}],"max_tokens":64}`)
+	if rec.Code != http.StatusOK || len(*calls) != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+	}
+	if (*calls)[0].Body["max_tokens"] != float64(lingTinyMinExplicitOutput) {
+		t.Fatalf("Tiny max_tokens was not raised: %#v", (*calls)[0].Body)
+	}
+}
+
 func TestProxyRejectsUnsupportedLingInputLocally(t *testing.T) {
 	for _, model := range []string{"inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-tiny:free"} {
 		t.Run(model, func(t *testing.T) {

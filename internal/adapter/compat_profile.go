@@ -9,6 +9,7 @@ import (
 const (
 	lingFlashFreeModel          = "inclusionai/ling-3.0-flash:free"
 	lingTinyFreeModel           = "inclusionai/ling-3.0-tiny:free"
+	lingTinyMinExplicitOutput   = 256
 	lingMaxExplicitOutputTokens = 32768
 )
 
@@ -17,6 +18,7 @@ type lingNormalizationStats struct {
 	ReasoningDropped        bool
 	StructuredOutputDropped bool
 	OversizedOutputDropped  bool
+	LowOutputRaised         bool
 }
 
 type lingRequestRejection struct {
@@ -102,8 +104,11 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 	if dropLingOversizedOutputLimits(payload) {
 		stats.OversizedOutputDropped = true
 	}
+	if strings.TrimSpace(model) == lingTinyFreeModel && raiseLingTinyLowOutputLimits(payload) {
+		stats.LowOutputRaised = true
+	}
 
-	stats.Changed = stats.ReasoningDropped || stats.StructuredOutputDropped || stats.OversizedOutputDropped
+	stats.Changed = stats.ReasoningDropped || stats.StructuredOutputDropped || stats.OversizedOutputDropped || stats.LowOutputRaised
 	if !stats.Changed {
 		return body, stats, nil, nil
 	}
@@ -134,6 +139,19 @@ func dropLingOversizedOutputLimits(payload map[string]any) bool {
 		dropped = true
 	}
 	return dropped
+}
+
+func raiseLingTinyLowOutputLimits(payload map[string]any) bool {
+	raised := false
+	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		limit, ok := payload[key].(float64)
+		if !ok || limit <= 0 || limit >= lingTinyMinExplicitOutput {
+			continue
+		}
+		payload[key] = float64(lingTinyMinExplicitOutput)
+		raised = true
+	}
+	return raised
 }
 
 func deleteNestedLingField(payload map[string]any, containerKey, fieldKey string) bool {

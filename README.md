@@ -85,7 +85,8 @@ same model at most once when salvage is unavailable, and buffers client streamin
 Hidden reasoning fields are removed from every validated non-stream response and are never emitted in SSE.
 Requests combining tools with `response_format` are rejected locally for these profiles; ordinary tools and
 requests without `response_format` stay on the existing path. Explicit `max_tokens`, `max_completion_tokens`,
-and `max_output_tokens` values up to 32768 are preserved; larger values are removed so Kilo can
+and `max_output_tokens` values up to 32768 are preserved; for Ling Tiny, positive values below 256 are
+raised to 256 so its reasoning phase cannot consume the full allowance before visible output. Larger values are removed so Kilo can
 apply its model/provider default instead of returning a generic upstream 400. If an oversized
 tool or externally stateful request cannot be trimmed without breaking call/result pairing,
 the adapter rejects it locally instead of forwarding stale or partial history; the detailed

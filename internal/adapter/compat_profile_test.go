@@ -144,6 +144,26 @@ func TestNormalizePaidLingFlashDoesNotUseFreeLingProfile(t *testing.T) {
 	}
 }
 
+func TestNormalizeLingTinyRaisesLowOutputLimits(t *testing.T) {
+	body := []byte(`{"model":"inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":"hello"}],"max_tokens":64,"max_completion_tokens":1,"max_output_tokens":256}`)
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection != nil || !stats.Changed || !stats.LowOutputRaised {
+		t.Fatalf("Tiny low output limits were not raised: stats=%#v rejection=%#v", stats, rejection)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if payload[key] != float64(lingTinyMinExplicitOutput) {
+			t.Fatalf("%s=%#v, want %d: %#v", key, payload[key], lingTinyMinExplicitOutput, payload)
+		}
+	}
+}
+
 func TestNormalizeLingRequestRejectsUnsupportedInputsInChinese(t *testing.T) {
 	tests := []struct {
 		name    string
