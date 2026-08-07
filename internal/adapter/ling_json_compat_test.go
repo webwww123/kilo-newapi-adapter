@@ -151,6 +151,85 @@ func TestLingJSONCompatRepairsEmptyCandidateWithSeparateOutputFloors(t *testing.
 	}
 }
 
+func TestCurrentLingJSONCompatPreservesCurrentModel(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		if call == 1 {
+			return jsonCompatTestCompletion(t, model, "status ok, value seven")
+		}
+		return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash","max_tokens":64,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"Return status ok and value 7."}]}`)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"status":"ok","value":7}` {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("upstream calls=%d, want 2: %#v", len(*calls), *calls)
+	}
+	for index, call := range *calls {
+		if call["model"] != "inclusionai/ling-3.0-flash" {
+			t.Fatalf("call %d model=%#v", index+1, call["model"])
+		}
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["model"] != "kilo/inclusionai/ling-3.0-flash" {
+		t.Fatalf("public model not preserved: %#v", envelope)
+	}
+}
+
+func TestCurrentLingJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		if call == 1 {
+			return jsonCompatTestCompletion(t, model, `{"status":"wrong","value":8}`)
+		}
+		return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
+	})
+	defer closeUpstream()
+
+	payload := `{"model":"kilo/inclusionai/ling-3.0-flash","stream":true,"max_tokens":64,"response_format":{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}},"messages":[{"role":"user","content":"Return status ok and value 7."}]}`
+	rec := postJSON(t, handler, "/v1/chat/completions", payload)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") || !strings.Contains(rec.Body.String(), "data: [DONE]") {
+		t.Fatalf("status=%d content-type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	if content := concatenateLingJSONTestStream(t, rec.Body.String()); content != `{"status":"ok","value":7}` {
+		t.Fatalf("stream content=%q body=%s", content, rec.Body.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("upstream calls=%d, want 2: %#v", len(*calls), *calls)
+	}
+	for index, call := range *calls {
+		if call["model"] != lingFlashModel || call["stream"] != false {
+			t.Fatalf("call %d controls wrong: %#v", index+1, call)
+		}
+	}
+	if !strings.Contains(rec.Body.String(), lingCurrentJSONPublicModel) {
+		t.Fatalf("current public model missing from stream: %s", rec.Body.String())
+	}
+}
+
+func TestCurrentLingJSONCompatLeavesOrdinaryToolsUntouched(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		return jsonCompatTestCompletion(t, model, "OK")
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+	if rec.Code != http.StatusOK || len(*calls) != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+	}
+	call := (*calls)[0]
+	if call["model"] != lingFlashModel || call["tool_choice"] != "auto" || len(call["tools"].([]any)) != 1 {
+		t.Fatalf("ordinary tools changed: %#v", call)
+	}
+}
+
 func TestLingJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
 	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, _ map[string]any) string {
 		if call == 1 {

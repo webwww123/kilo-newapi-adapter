@@ -247,35 +247,43 @@ func TestProxyNormalizesLingUnsupportedReasoningControl(t *testing.T) {
 }
 
 func TestProxyDropsOversizedLingOutputLimit(t *testing.T) {
-	upstream, calls := newRecordingUpstream(t)
-	defer upstream.Close()
-	handler := newTestHandler(upstream.URL)
+	for _, model := range []string{"inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash"} {
+		t.Run(model, func(t *testing.T) {
+			upstream, calls := newRecordingUpstream(t)
+			defer upstream.Close()
+			handler := newTestHandler(upstream.URL)
 
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"hello"}],"max_tokens":64000}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if len(*calls) != 1 {
-		t.Fatalf("upstream calls=%d, want 1", len(*calls))
-	}
+			rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/`+model+`","messages":[{"role":"user","content":"hello"}],"max_tokens":64000}`)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(*calls) != 1 {
+				t.Fatalf("upstream calls=%d, want 1", len(*calls))
+			}
 
-	call := (*calls)[0]
-	if _, exists := call.Body["max_tokens"]; exists {
-		t.Fatalf("oversized max_tokens reached upstream: %#v", call.Body)
+			call := (*calls)[0]
+			if _, exists := call.Body["max_tokens"]; exists {
+				t.Fatalf("oversized max_tokens reached upstream: %#v", call.Body)
+			}
+		})
 	}
 }
 
 func TestProxyRejectsUnsupportedLingInputLocally(t *testing.T) {
-	upstream, calls := newRecordingUpstream(t)
-	defer upstream.Close()
-	handler := newTestHandler(upstream.URL)
+	for _, model := range []string{"inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash"} {
+		t.Run(model, func(t *testing.T) {
+			upstream, calls := newRecordingUpstream(t)
+			defer upstream.Close()
+			handler := newTestHandler(upstream.URL)
 
-	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-	if len(*calls) != 0 {
-		t.Fatalf("unsupported input reached upstream: %#v", *calls)
+			rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/`+model+`","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`)
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), publicClientErrorMessage) {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(*calls) != 0 {
+				t.Fatalf("unsupported input reached upstream: %#v", *calls)
+			}
+		})
 	}
 }
 
@@ -959,45 +967,49 @@ func TestNvidiaSuperFreeUsesActual262KContextLimit(t *testing.T) {
 	}
 }
 
-func TestLingFlashFreeUsesActual262KContextLimit(t *testing.T) {
-	profile, ok := freeContextTrimProfiles["inclusionai/ling-3.0-flash:free"]
-	if !ok {
-		t.Fatal("ling flash context trim profile is missing")
-	}
-	wantProfile := contextTrimProfile{ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000}
-	if profile != wantProfile {
-		t.Fatalf("ling flash context trim profile = %#v, want %#v", profile, wantProfile)
-	}
+func TestLingFlashModelsUseActual262KContextLimit(t *testing.T) {
+	for _, model := range []string{"inclusionai/ling-3.0-flash:free", "inclusionai/ling-3.0-flash"} {
+		t.Run(model, func(t *testing.T) {
+			profile, ok := freeContextTrimProfiles[model]
+			if !ok {
+				t.Fatal("ling flash context trim profile is missing")
+			}
+			wantProfile := contextTrimProfile{ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000}
+			if profile != wantProfile {
+				t.Fatalf("ling flash context trim profile = %#v, want %#v", profile, wantProfile)
+			}
 
-	upstream, calls := newRecordingUpstream(t)
-	defer upstream.Close()
+			upstream, calls := newRecordingUpstream(t)
+			defer upstream.Close()
 
-	handler := newTestHandler(upstream.URL)
-	oldContent := "DROP_LING_FLASH_OLD " + strings.Repeat("old ", 160000)
-	rec := postJSON(t, handler, "/v1/chat/completions", `{
-		"model":"kilo/inclusionai/ling-3.0-flash:free",
-		"messages":[
-			{"role":"system","content":"KEEP_LING_FLASH_SYSTEM"},
-			{"role":"user","content":"`+oldContent+`"},
-			{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
-			{"role":"user","content":"KEEP_LING_FLASH_LATEST"}
-		],
-		"tools":[{"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],
-		"max_tokens":64000
-	}`)
+			handler := newTestHandler(upstream.URL)
+			oldContent := "DROP_LING_FLASH_OLD " + strings.Repeat("old ", 160000)
+			rec := postJSON(t, handler, "/v1/chat/completions", `{
+				"model":"kilo/`+model+`",
+				"messages":[
+					{"role":"system","content":"KEEP_LING_FLASH_SYSTEM"},
+					{"role":"user","content":"`+oldContent+`"},
+					{"role":"assistant","content":"`+strings.Repeat("assistant ", 160000)+`"},
+					{"role":"user","content":"KEEP_LING_FLASH_LATEST"}
+				],
+				"tools":[{"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"q":{"type":"string"}}}}}],
+				"max_tokens":64000
+			}`)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	messages := (*calls)[0].Body["messages"].([]any)
-	if !messagesContainText(messages, "KEEP_LING_FLASH_SYSTEM") {
-		t.Fatalf("trimmed messages dropped system message; len=%d", len(messages))
-	}
-	if !messagesContainText(messages, "KEEP_LING_FLASH_LATEST") {
-		t.Fatalf("trimmed messages dropped latest user; len=%d", len(messages))
-	}
-	if messagesContainText(messages, "DROP_LING_FLASH_OLD") {
-		t.Fatalf("trimmed messages kept old ling flash context; len=%d", len(messages))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			messages := (*calls)[0].Body["messages"].([]any)
+			if !messagesContainText(messages, "KEEP_LING_FLASH_SYSTEM") {
+				t.Fatalf("trimmed messages dropped system message; len=%d", len(messages))
+			}
+			if !messagesContainText(messages, "KEEP_LING_FLASH_LATEST") {
+				t.Fatalf("trimmed messages dropped latest user; len=%d", len(messages))
+			}
+			if messagesContainText(messages, "DROP_LING_FLASH_OLD") {
+				t.Fatalf("trimmed messages kept old ling flash context; len=%d", len(messages))
+			}
+		})
 	}
 }
 

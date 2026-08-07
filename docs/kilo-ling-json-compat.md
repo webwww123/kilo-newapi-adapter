@@ -2,7 +2,7 @@
 
 ## Scope
 
-- Models: `kilo/inclusionai/ling-3.0-flash:free`, `kilo/stepfun/step-3.7-flash:free`, `kilo/kilo-auto/free`, and `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` (prefixed or unprefixed internal forms).
+- Models: `kilo/inclusionai/ling-3.0-flash`, `kilo/inclusionai/ling-3.0-flash:free`, `kilo/stepfun/step-3.7-flash:free`, `kilo/kilo-auto/free`, and `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` (prefixed or unprefixed internal forms).
 - Endpoint: OpenAI Chat Completions only.
 - Formats: `json_object` and local strict `json_schema` validation.
 - Ordinary requests, other models, Responses, Messages, and tools without `response_format` are unchanged.
@@ -17,6 +17,7 @@
 - Validated non-stream responses remove reasoning-related fields; SSE emits only canonical JSON content.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.
+- Paid Kilo models still require the adapter's root-only `KILO_API_KEY`; compatibility processing does not bypass upstream authentication or billing.
 
 ## Observability
 

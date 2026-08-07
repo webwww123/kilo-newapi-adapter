@@ -8,7 +8,7 @@ Single-base adapter for putting Kilo's no-key gateway behind NewAPI while servin
 
 The adapter rewrites standard paths to Kilo gateway paths. Public model IDs are exposed with
 the `kilo/` prefix, and that prefix is stripped before forwarding requests to Kilo.
-For selected free models, it also trims oversized request context before forwarding.
+For selected profiled models, it also trims oversized request context before forwarding.
 
 ## Default Mapping
 
@@ -57,7 +57,7 @@ REQUEST_LOG_RETENTION=48h
 REQUEST_LOG_BODY_LIMIT=1048576
 ```
 
-`KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
+`KILO_API_KEY` is optional for the tested free models and required for paid models such as the current `inclusionai/ling-3.0-flash` route. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
 
 ## Public Error Policy
 
@@ -66,16 +66,17 @@ REQUEST_LOG_BODY_LIMIT=1048576
 - HTTP 200 error envelopes and SSE error events use the same generic 500 message.
 - Original adapter and upstream error details remain in the root-only request log for internal debugging and are never returned to clients.
 
-## Free Model Context Trimming
+## Profiled Model Context Trimming
 
-Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
+Context trimming is intentionally limited to manually profiled models. Unknown models pass through unchanged.
 
 The trim policy keeps system/developer items, the originating user request, and the newest completed tool turn first. OpenAI `assistant.tool_calls` plus `tool` results, Anthropic `tool_use` plus `tool_result` blocks, and Responses `function_call` plus `function_call_output` items are retained atomically. Oversized newest tool results are truncated while preserving both edges before older conversation turns are considered. If the required current tool structure still cannot fit, the adapter leaves the original request history intact so the upstream can return an explicit context error instead of receiving stale partial history.
 
-Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
+Current profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
+The current paid `inclusionai/ling-3.0-flash` ID uses the same advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
 
-Ling requests are normalized locally before they reach Kilo. Image, audio, video, and
+Both current and retired-free Ling Flash requests are normalized locally before they reach Kilo. Image, audio, video, and
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
 controls are removed. Chat Completions `json_object` and strict `json_schema` requests are captured before
 the upstream cleanup step and emulated in-process for Ling and StepFun 3.7: the adapter validates the completed

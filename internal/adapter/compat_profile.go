@@ -8,6 +8,7 @@ import (
 
 const (
 	lingFlashFreeModel          = "inclusionai/ling-3.0-flash:free"
+	lingFlashModel              = "inclusionai/ling-3.0-flash"
 	lingMaxExplicitOutputTokens = 32768
 )
 
@@ -36,7 +37,7 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 		return nil, stats, nil, fmt.Errorf("invalid JSON body: %w", err)
 	}
 	model, _ := payload["model"].(string)
-	if strings.TrimSpace(model) != lingFlashFreeModel {
+	if !isLingFlashModel(model) {
 		return body, stats, nil, nil
 	}
 
@@ -111,6 +112,15 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 		return nil, stats, nil, fmt.Errorf("encode Ling request cleanup: %w", err)
 	}
 	return out, stats, nil, nil
+}
+
+func isLingFlashModel(model string) bool {
+	switch strings.TrimSpace(model) {
+	case lingFlashFreeModel, lingFlashModel:
+		return true
+	default:
+		return false
+	}
 }
 
 func dropLingOversizedOutputLimits(payload map[string]any) bool {

@@ -101,6 +101,37 @@ func TestNormalizeLingRequestDropsOnlyOversizedOutputLimits(t *testing.T) {
 	}
 }
 
+func TestNormalizeCurrentLingRequestUsesLingProfile(t *testing.T) {
+	body := []byte(`{
+		"model":"inclusionai/ling-3.0-flash",
+		"messages":[{"role":"user","content":"hello"}],
+		"response_format":{"type":"json_object"},
+		"reasoning_effort":"high",
+		"max_tokens":64000
+	}`)
+
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection != nil {
+		t.Fatalf("request was rejected: %#v", rejection)
+	}
+	if !stats.Changed || !stats.ReasoningDropped || !stats.StructuredOutputDropped || !stats.OversizedOutputDropped {
+		t.Fatalf("current Ling request did not use the Ling profile: %#v", stats)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"response_format", "reasoning_effort", "max_tokens"} {
+		if _, exists := payload[key]; exists {
+			t.Fatalf("%s still present: %#v", key, payload)
+		}
+	}
+}
+
 func TestNormalizeLingRequestRejectsUnsupportedInputsInChinese(t *testing.T) {
 	tests := []struct {
 		name    string
