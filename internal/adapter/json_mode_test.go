@@ -81,32 +81,3 @@ func TestDowngradeFreeModelJSONModeLeavesOtherRequestsUnchanged(t *testing.T) {
 		})
 	}
 }
-
-func TestProxyDowngradesStepfunJSONModeBeforeUpstream(t *testing.T) {
-	upstream, calls := newRecordingUpstream(t)
-	defer upstream.Close()
-	handler := newTestHandler(upstream.URL)
-	recorder := postJSON(t, handler, "/v1/chat/completions", `{
-		"model":"kilo/stepfun/step-3.7-flash:free",
-		"messages":[{"role":"system","content":"Be concise."},{"role":"user","content":"give data"}],
-		"response_format":{"type":"json_object"},
-		"stream":true
-	}`)
-	if recorder.Code != 200 {
-		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	if len(*calls) != 1 {
-		t.Fatalf("upstream calls=%d, want 1", len(*calls))
-	}
-	request := (*calls)[0].Body
-	if _, exists := request["response_format"]; exists {
-		t.Fatalf("response_format reached upstream: %#v", request)
-	}
-	if request["model"] != stepfunFlashFreeModel || request["stream"] != true {
-		t.Fatalf("model or stream changed: %#v", request)
-	}
-	messages := request["messages"].([]any)
-	if got := messages[0].(map[string]any)["content"].(string); !strings.Contains(got, jsonObjectInstruction) {
-		t.Fatalf("JSON instruction missing upstream: %q", got)
-	}
-}

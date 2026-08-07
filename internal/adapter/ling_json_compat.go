@@ -17,6 +17,7 @@ import (
 
 const (
 	lingJSONPublicModel          = publicModelPrefix + lingFlashFreeModel
+	stepfunJSONPublicModel       = publicModelPrefix + stepfunFlashFreeModel
 	lingJSONMaxSchemaBytes       = 64 << 10
 	lingJSONMaxRepairBytes       = 64 << 10
 	lingJSONFirstOutputFloor     = 256
@@ -38,11 +39,14 @@ type lingJSONPreloadedBodyKey struct{}
 type lingJSONSpec struct {
 	Kind           string
 	OriginalStream bool
+	Profile        string
+	PublicModel    string
 	SchemaRaw      []byte
 	Schema         *jsonschema.Schema
 }
 
 type lingJSONStats struct {
+	Profile           string
 	RequestedType     string
 	Attempts          int
 	ValidationFailure int
@@ -89,6 +93,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	stats := &lingJSONStats{
+		Profile:        spec.Profile,
 		RequestedType:  spec.Kind,
 		BufferedStream: spec.OriginalStream,
 		SchemaBytes:    len(spec.SchemaRaw),
@@ -147,7 +152,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		stats.Validated = true
 		stats.PublicStatus = http.StatusOK
 		if spec.OriginalStream {
-			writeLingJSONSSE(w, envelope, canonical)
+			writeLingJSONSSE(w, envelope, canonical, spec.PublicModel)
 			return
 		}
 		rewritten, rewriteErr := rewriteLingJSONContent(envelope, canonical)
@@ -237,9 +242,12 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 		return nil, spec, false, nil
 	}
 	model := strings.TrimSpace(fmt.Sprint(payload["model"]))
-	if model != lingJSONPublicModel && model != lingFlashFreeModel {
+	profile, publicModel, supported := jsonCompatModelProfile(model)
+	if !supported {
 		return payload, spec, false, nil
 	}
+	spec.Profile = profile
+	spec.PublicModel = publicModel
 	formatValue, exists := payload["response_format"]
 	if !exists {
 		return payload, spec, false, nil
@@ -283,12 +291,23 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	}
 }
 
+func jsonCompatModelProfile(model string) (string, string, bool) {
+	switch strings.TrimSpace(model) {
+	case lingJSONPublicModel, lingFlashFreeModel:
+		return "ling", lingJSONPublicModel, true
+	case stepfunJSONPublicModel, stepfunFlashFreeModel:
+		return "stepfun", stepfunJSONPublicModel, true
+	default:
+		return "", "", false
+	}
+}
+
 func compileLingJSONSchema(raw []byte) (*jsonschema.Schema, error) {
 	compiler := jsonschema.NewCompiler()
 	compiler.LoadURL = func(string) (io.ReadCloser, error) {
 		return nil, errors.New("external schema references are disabled")
 	}
-	const resource = "https://local.invalid/ling-response-schema.json"
+	const resource = "https://local.invalid/kilo-response-schema.json"
 	if err := compiler.AddResource(resource, bytes.NewReader(raw)); err != nil {
 		return nil, err
 	}
@@ -639,14 +658,17 @@ func copyLingJSONHeaders(dst, src http.Header) {
 	}
 }
 
-func writeLingJSONSSE(w http.ResponseWriter, envelope map[string]any, canonical []byte) {
+func writeLingJSONSSE(w http.ResponseWriter, envelope map[string]any, canonical []byte, fallbackModel string) {
 	id := strings.TrimSpace(fmt.Sprint(envelope["id"]))
 	if id == "" || id == "<nil>" {
 		id = "chatcmpl-kilo-json-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	}
 	model := strings.TrimSpace(fmt.Sprint(envelope["model"]))
 	if model == "" || model == "<nil>" {
-		model = lingJSONPublicModel
+		model = strings.TrimSpace(fallbackModel)
+		if model == "" {
+			model = lingJSONPublicModel
+		}
 	}
 	created := time.Now().Unix()
 	if value, ok := envelope["created"].(json.Number); ok {
@@ -695,7 +717,8 @@ func logLingJSONCompat(stats *lingJSONStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_ling_json_compat type=%s attempts=%d validation_failures=%d validated=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+		stats.Profile,
 		stats.RequestedType,
 		stats.Attempts,
 		stats.ValidationFailure,

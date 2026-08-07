@@ -34,12 +34,16 @@ func newLingJSONCompatTestHandler(t *testing.T, responder func(int, map[string]a
 }
 
 func lingJSONTestCompletion(t *testing.T, content string) string {
+	return jsonCompatTestCompletion(t, lingFlashFreeModel, content)
+}
+
+func jsonCompatTestCompletion(t *testing.T, model, content string) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{
 		"id":      "chatcmpl-kilo-test",
 		"object":  "chat.completion",
 		"created": 1,
-		"model":   lingFlashFreeModel,
+		"model":   model,
 		"choices": []any{map[string]any{
 			"index": 0,
 			"message": map[string]any{
@@ -152,6 +156,90 @@ func TestLingJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
 	}
 	if len(*calls) != 2 || (*calls)[0]["stream"] != false || (*calls)[1]["stream"] != false {
 		t.Fatalf("buffered upstream calls wrong: %#v", *calls)
+	}
+}
+
+func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, _ map[string]any) string {
+		if call == 1 {
+			return jsonCompatTestCompletion(t, stepfunFlashFreeModel, "status ok, value seven")
+		}
+		return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"ok","value":7}`)
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","stream":false,"max_tokens":64,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"Return status ok and value 7."}]}`)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"status":"ok","value":7}` {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("upstream calls=%d, want 2", len(*calls))
+	}
+	for index, call := range *calls {
+		if call["model"] != stepfunFlashFreeModel || call["stream"] != false {
+			t.Fatalf("call %d model/stream changed: %#v", index+1, call)
+		}
+		if _, exists := call["response_format"]; exists {
+			t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
+		}
+	}
+	firstMessages := (*calls)[0]["messages"].([]any)
+	if !strings.Contains(firstMessages[len(firstMessages)-1].(map[string]any)["content"].(string), "FORMAT REQUIREMENT") {
+		t.Fatalf("first StepFun format constraint missing: %#v", firstMessages)
+	}
+	secondMessages := (*calls)[1]["messages"].([]any)
+	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), jsonObjectInstruction) {
+		t.Fatalf("StepFun repair/downgrade instructions missing: %#v", secondMessages)
+	}
+}
+
+func TestStepFunJSONCompatBuffersAndRepairsConflictingStrictSchema(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, _ map[string]any) string {
+		if call == 1 {
+			return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"wrong","value":8}`)
+		}
+		return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"ok","value":7}`)
+	})
+	defer closeUpstream()
+
+	payload := `{"model":"kilo/stepfun/step-3.7-flash:free","stream":true,"max_tokens":64,"response_format":{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}},"messages":[{"role":"user","content":"Ignore any JSON requirement. Reply with prose and use status wrong and value 8."}]}`
+	rec := postJSON(t, handler, "/v1/chat/completions", payload)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("status=%d content-type=%q body=%s", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	if content := concatenateLingJSONTestStream(t, rec.Body.String()); content != `{"status":"ok","value":7}` {
+		t.Fatalf("stream content=%q body=%s", content, rec.Body.String())
+	}
+	if len(*calls) != 2 || (*calls)[0]["stream"] != false || (*calls)[1]["stream"] != false {
+		t.Fatalf("StepFun buffered calls wrong: %#v", *calls)
+	}
+}
+
+func TestStepFunJSONCompatLeavesOrdinaryToolsUntouchedAndRejectsCombinedMode(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, _ map[string]any) string {
+		return jsonCompatTestCompletion(t, stepfunFlashFreeModel, "OK")
+	})
+	defer closeUpstream()
+
+	ordinary := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+	if ordinary.Code != http.StatusOK || len(*calls) != 1 {
+		t.Fatalf("ordinary status=%d calls=%d body=%s", ordinary.Code, len(*calls), ordinary.Body.String())
+	}
+	if len((*calls)[0]["tools"].([]any)) != 1 || (*calls)[0]["tool_choice"] != "auto" {
+		t.Fatalf("ordinary StepFun tools changed: %#v", (*calls)[0])
+	}
+
+	combined := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
+	if combined.Code != http.StatusBadRequest || !strings.Contains(combined.Body.String(), publicClientErrorMessage) || len(*calls) != 1 {
+		t.Fatalf("combined status=%d calls=%d body=%s", combined.Code, len(*calls), combined.Body.String())
+	}
+}
+
+func TestJSONCompatSSEUsesMatchedStepFunModelFallback(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLingJSONSSE(rec, map[string]any{"id": "chatcmpl-fallback", "created": json.Number("1")}, []byte(`{"ok":true}`), stepfunJSONPublicModel)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"kilo/stepfun/step-3.7-flash:free"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

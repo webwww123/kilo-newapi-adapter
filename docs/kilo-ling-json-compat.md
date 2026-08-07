@@ -1,8 +1,8 @@
-# Kilo Ling JSON Compatibility
+# Kilo Structured JSON Compatibility
 
 ## Scope
 
-- Model: `kilo/inclusionai/ling-3.0-flash:free` (prefixed or unprefixed internal form).
+- Models: `kilo/inclusionai/ling-3.0-flash:free` and `kilo/stepfun/step-3.7-flash:free` (prefixed or unprefixed internal forms).
 - Endpoint: OpenAI Chat Completions only.
 - Formats: `json_object` and local strict `json_schema` validation.
 - Ordinary requests, other models, Responses, Messages, and tools without `response_format` are unchanged.
@@ -18,8 +18,10 @@
 
 ## Observability
 
-Journal records use the `kilo_ling_json_compat` prefix and contain only format, attempts, validation counts, repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, candidate text, headers, credentials, or raw upstream errors.
+Journal records use the `kilo_json_compat` prefix with a safe `ling` or `stepfun` profile and contain only format, attempts, validation counts, repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, candidate text, headers, credentials, or raw upstream errors.
 
 ## Latest Gate
 
-On 2026-08-06, the isolated and live-wrapper gates covered ordinary chat, object/schema modes, empty-candidate reconstruction, non-streaming and streaming. Every 2xx structured response validated; accepted failures were upstream errors/timeouts rather than local JSON validation failures.
+On 2026-08-06, the Ling isolated and live-wrapper gates covered ordinary chat, object/schema modes, empty-candidate reconstruction, non-streaming and streaming. Every 2xx structured response validated; accepted failures were upstream errors/timeouts rather than local JSON validation failures.
+
+On 2026-08-07, StepFun was added after direct native probes repeatedly returned HTTP 400 for `json_object` and violated conflicting strict Schemas. Its focused local gate covers object repair, strict-Schema repair, buffered streaming, ordinary tools, combined tool/format rejection, and public-model preservation.
