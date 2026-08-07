@@ -22,7 +22,8 @@ const (
 	lingJSONMaxRepairBytes       = 64 << 10
 	lingJSONFirstOutputFloor     = 256
 	lingJSONRepairOutputFloor    = 1024
-	stepfunJSONRepairOutputFloor = 4096
+	stepfunJSONRepairModel       = "nvidia/nemotron-3-super-120b-a12b:free"
+	stepfunJSONRepairPublicModel = publicModelPrefix + stepfunJSONRepairModel
 	lingJSONMaxAttempts          = 2
 	lingJSONRequestPath          = "/chat/completions"
 	lingJSONObjectFormat         = "json_object"
@@ -44,12 +45,15 @@ type lingJSONSpec struct {
 	PublicModel    string
 	FirstFloor     int
 	RepairFloor    int
+	RepairModel    string
+	RepairProfile  string
 	SchemaRaw      []byte
 	Schema         *jsonschema.Schema
 }
 
 type lingJSONStats struct {
 	Profile           string
+	RepairProfile     string
 	RequestedType     string
 	Attempts          int
 	ValidationFailure int
@@ -97,6 +101,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 
 	stats := &lingJSONStats{
 		Profile:        spec.Profile,
+		RepairProfile:  spec.RepairProfile,
 		RequestedType:  spec.Kind,
 		BufferedStream: spec.OriginalStream,
 		SchemaBytes:    len(spec.SchemaRaw),
@@ -154,6 +159,9 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 
 		stats.Validated = true
 		stats.PublicStatus = http.StatusOK
+		if spec.PublicModel != "" {
+			envelope["model"] = spec.PublicModel
+		}
 		if spec.OriginalStream {
 			writeLingJSONSSE(w, envelope, canonical, spec.PublicModel)
 			return
@@ -254,7 +262,10 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	spec.FirstFloor = lingJSONFirstOutputFloor
 	spec.RepairFloor = lingJSONRepairOutputFloor
 	if profile == "stepfun" {
-		spec.RepairFloor = stepfunJSONRepairOutputFloor
+		spec.RepairModel = stepfunJSONRepairPublicModel
+		spec.RepairProfile = "nemotron_super"
+	} else {
+		spec.RepairProfile = "same_model"
 	}
 	formatValue, exists := payload["response_format"]
 	if !exists {
@@ -362,6 +373,9 @@ func buildLingJSONRepairBody(original map[string]any, spec lingJSONSpec, candida
 	payload["temperature"] = 0
 	payload["response_format"] = map[string]any{"type": lingJSONObjectFormat}
 	raiseLingJSONOutputFloor(payload, spec.RepairFloor)
+	if spec.RepairModel != "" {
+		payload["model"] = spec.RepairModel
+	}
 
 	messages, _ := payload["messages"].([]any)
 	policyMessages := make([]any, 0, len(messages)+2)
@@ -725,8 +739,9 @@ func logLingJSONCompat(stats *lingJSONStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+	fmt.Printf("kilo_json_compat profile=%s repair_backend=%s type=%s attempts=%d validation_failures=%d validated=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
 		stats.Profile,
+		stats.RepairProfile,
 		stats.RequestedType,
 		stats.Attempts,
 		stats.ValidationFailure,

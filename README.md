@@ -91,8 +91,9 @@ reason remains available in the internal request log.
 Kilo's provider pool for `stepfun/step-3.7-flash:free` inconsistently rejects OpenAI
 `response_format` and does not reliably enforce conflicting strict Schemas. The adapter therefore captures
 explicit Chat Completions object/Schema requests, removes the unsupported upstream field, applies a final-format
-constraint, validates the completed object locally, and performs at most one bounded repair. Other models,
-protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
+constraint, validates the completed object locally, and performs at most one bounded repair through the
+native-complete Kilo Nemotron Super profile. The returned envelope is restored to the requested StepFun public
+model. Other models, protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
 
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.

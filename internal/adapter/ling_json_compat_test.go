@@ -160,11 +160,12 @@ func TestLingJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
 }
 
 func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T) {
-	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, _ map[string]any) string {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
 		if call == 1 {
-			return jsonCompatTestCompletion(t, stepfunFlashFreeModel, "status ok, value seven")
+			return jsonCompatTestCompletion(t, model, "status ok, value seven")
 		}
-		return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"ok","value":7}`)
+		return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
 	})
 	defer closeUpstream()
 
@@ -175,33 +176,48 @@ func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T)
 	if len(*calls) != 2 {
 		t.Fatalf("upstream calls=%d, want 2", len(*calls))
 	}
+	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunJSONRepairModel {
+		t.Fatalf("StepFun first/repair models wrong: %#v", *calls)
+	}
 	for index, call := range *calls {
-		if call["model"] != stepfunFlashFreeModel || call["stream"] != false {
-			t.Fatalf("call %d model/stream changed: %#v", index+1, call)
+		if call["stream"] != false {
+			t.Fatalf("call %d stream changed: %#v", index+1, call)
 		}
-		if _, exists := call["response_format"]; exists {
-			t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
-		}
+	}
+	if _, exists := (*calls)[0]["response_format"]; exists {
+		t.Fatalf("StepFun first attempt forwarded response_format: %#v", (*calls)[0])
+	}
+	repairFormat, _ := (*calls)[1]["response_format"].(map[string]any)
+	if repairFormat["type"] != lingJSONObjectFormat {
+		t.Fatalf("Nemotron repair format missing: %#v", (*calls)[1])
 	}
 	firstMessages := (*calls)[0]["messages"].([]any)
 	if !strings.Contains(firstMessages[len(firstMessages)-1].(map[string]any)["content"].(string), "FORMAT REQUIREMENT") {
 		t.Fatalf("first StepFun format constraint missing: %#v", firstMessages)
 	}
 	secondMessages := (*calls)[1]["messages"].([]any)
-	if (*calls)[1]["max_tokens"] != float64(stepfunJSONRepairOutputFloor) {
-		t.Fatalf("StepFun repair floor=%#v, want %d", (*calls)[1]["max_tokens"], stepfunJSONRepairOutputFloor)
+	if (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
+		t.Fatalf("StepFun repair floor=%#v, want %d", (*calls)[1]["max_tokens"], lingJSONRepairOutputFloor)
 	}
-	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), jsonObjectInstruction) {
-		t.Fatalf("StepFun repair/downgrade instructions missing: %#v", secondMessages)
+	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") {
+		t.Fatalf("StepFun repair instruction missing: %#v", secondMessages)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["model"] != stepfunJSONPublicModel || strings.Contains(rec.Body.String(), stepfunJSONRepairModel) {
+		t.Fatalf("StepFun public model was not restored: %s", rec.Body.String())
 	}
 }
 
 func TestStepFunJSONCompatBuffersAndRepairsConflictingStrictSchema(t *testing.T) {
-	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, _ map[string]any) string {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
 		if call == 1 {
-			return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"wrong","value":8}`)
+			return jsonCompatTestCompletion(t, model, `{"status":"wrong","value":8}`)
 		}
-		return jsonCompatTestCompletion(t, stepfunFlashFreeModel, `{"status":"ok","value":7}`)
+		return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
 	})
 	defer closeUpstream()
 
@@ -215,6 +231,9 @@ func TestStepFunJSONCompatBuffersAndRepairsConflictingStrictSchema(t *testing.T)
 	}
 	if len(*calls) != 2 || (*calls)[0]["stream"] != false || (*calls)[1]["stream"] != false {
 		t.Fatalf("StepFun buffered calls wrong: %#v", *calls)
+	}
+	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunJSONRepairModel || strings.Contains(rec.Body.String(), stepfunJSONRepairModel) || !strings.Contains(rec.Body.String(), stepfunJSONPublicModel) {
+		t.Fatalf("StepFun streaming repair model handling wrong: calls=%#v body=%s", *calls, rec.Body.String())
 	}
 }
 

@@ -12,13 +12,14 @@
 - Removes the unsupported upstream format field only after capturing its intent.
 - First attempt keeps the original conversation and appends a compact final-format constraint.
 - Invalid or empty output gets one repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data.
-- Explicit low output limits use a 256-token first floor. Ling keeps its proven 1024-token repair-only floor; StepFun uses a 4096-token repair-only floor because lower limits can be exhausted by hidden reasoning before any visible JSON is emitted.
+- Explicit low output limits use a 256-token first floor and a 1024-token repair-only floor.
+- Ling repairs with the same model. StepFun repairs once through Kilo Nemotron Super because StepFun self-repair can exhaust large output budgets in hidden reasoning; the final response model is always restored to the requested StepFun public model.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.
 
 ## Observability
 
-Journal records use the `kilo_json_compat` prefix with a safe `ling` or `stepfun` profile and contain only format, attempts, validation counts, repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, candidate text, headers, credentials, or raw upstream errors.
+Journal records use the `kilo_json_compat` prefix with safe request and repair profiles and contain only format, attempts, validation counts, repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, candidate text, headers, credentials, or raw upstream errors.
 
 ## Latest Gate
 
