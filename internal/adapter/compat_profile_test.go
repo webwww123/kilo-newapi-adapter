@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -101,9 +102,9 @@ func TestNormalizeLingRequestDropsOnlyOversizedOutputLimits(t *testing.T) {
 	}
 }
 
-func TestNormalizeCurrentLingRequestUsesLingProfile(t *testing.T) {
+func TestNormalizeLingTinyRequestUsesLingProfile(t *testing.T) {
 	body := []byte(`{
-		"model":"inclusionai/ling-3.0-flash",
+		"model":"inclusionai/ling-3.0-tiny:free",
 		"messages":[{"role":"user","content":"hello"}],
 		"response_format":{"type":"json_object"},
 		"reasoning_effort":"high",
@@ -118,7 +119,7 @@ func TestNormalizeCurrentLingRequestUsesLingProfile(t *testing.T) {
 		t.Fatalf("request was rejected: %#v", rejection)
 	}
 	if !stats.Changed || !stats.ReasoningDropped || !stats.StructuredOutputDropped || !stats.OversizedOutputDropped {
-		t.Fatalf("current Ling request did not use the Ling profile: %#v", stats)
+		t.Fatalf("Ling Tiny request did not use the Ling profile: %#v", stats)
 	}
 
 	var payload map[string]any
@@ -129,6 +130,17 @@ func TestNormalizeCurrentLingRequestUsesLingProfile(t *testing.T) {
 		if _, exists := payload[key]; exists {
 			t.Fatalf("%s still present: %#v", key, payload)
 		}
+	}
+}
+
+func TestNormalizePaidLingFlashDoesNotUseFreeLingProfile(t *testing.T) {
+	body := []byte(`{"model":"inclusionai/ling-3.0-flash","messages":[{"role":"user","content":"hello"}],"response_format":{"type":"json_object"},"reasoning_effort":"high","max_tokens":64000}`)
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection != nil || stats.Changed || !bytes.Equal(out, body) {
+		t.Fatalf("paid Flash unexpectedly used free Ling compatibility: stats=%#v rejection=%#v out=%s", stats, rejection, out)
 	}
 }
 

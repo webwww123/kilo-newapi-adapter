@@ -8,7 +8,7 @@ import (
 
 const (
 	lingFlashFreeModel          = "inclusionai/ling-3.0-flash:free"
-	lingFlashModel              = "inclusionai/ling-3.0-flash"
+	lingTinyFreeModel           = "inclusionai/ling-3.0-tiny:free"
 	lingMaxExplicitOutputTokens = 32768
 )
 
@@ -37,7 +37,7 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 		return nil, stats, nil, fmt.Errorf("invalid JSON body: %w", err)
 	}
 	model, _ := payload["model"].(string)
-	if !isLingFlashModel(model) {
+	if !isLingCompatModel(model) {
 		return body, stats, nil, nil
 	}
 
@@ -114,9 +114,9 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 	return out, stats, nil, nil
 }
 
-func isLingFlashModel(model string) bool {
+func isLingCompatModel(model string) bool {
 	switch strings.TrimSpace(model) {
-	case lingFlashFreeModel, lingFlashModel:
+	case lingFlashFreeModel, lingTinyFreeModel:
 		return true
 	default:
 		return false

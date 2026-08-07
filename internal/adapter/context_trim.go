@@ -39,7 +39,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"nvidia/nemotron-3-super-120b-a12b:free":             {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"openrouter/free":                                    {ContextLimit: 200000, SafetyMargin: 40000, MaxInputTokens: 150000},
 	"inclusionai/ling-3.0-flash:free":                    {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
-	"inclusionai/ling-3.0-flash":                         {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
+	"inclusionai/ling-3.0-tiny:free":                     {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 }
 
 func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrimStats, error) {
@@ -88,7 +88,7 @@ func lingRequestStillExceedsContextLimit(body []byte, upstreamPath string) (bool
 	}
 	model, _ := payload["model"].(string)
 	model = strings.TrimPrefix(strings.TrimSpace(model), publicModelPrefix)
-	if !isLingFlashModel(model) {
+	if !isLingCompatModel(model) {
 		return false, nil
 	}
 	profile, ok := freeContextTrimProfiles[model]
