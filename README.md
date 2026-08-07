@@ -79,7 +79,9 @@ Ling requests are normalized locally before they reach Kilo. Image, audio, video
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
 controls are removed. Chat Completions `json_object` and strict `json_schema` requests are captured before
 the upstream cleanup step and emulated in-process for Ling and StepFun 3.7: the adapter validates the completed
-object, repairs an invalid or empty first answer once, and buffers client streaming until validation succeeds.
+object, locally salvages a validated object from hidden reasoning when visible content is empty, repairs with the
+same model at most once when salvage is unavailable, and buffers client streaming until validation succeeds.
+Hidden reasoning fields are removed from every validated non-stream response and are never emitted in SSE.
 Requests combining tools with `response_format` are rejected locally for these profiles; ordinary tools and
 requests without `response_format` stay on the existing path. Explicit `max_tokens`, `max_completion_tokens`,
 and `max_output_tokens` values up to 32768 are preserved; larger values are removed so Kilo can
@@ -91,9 +93,9 @@ reason remains available in the internal request log.
 Kilo's provider pool for `stepfun/step-3.7-flash:free` inconsistently rejects OpenAI
 `response_format` and does not reliably enforce conflicting strict Schemas. The adapter therefore captures
 explicit Chat Completions object/Schema requests, removes the unsupported upstream field, applies a final-format
-constraint, validates the completed object locally, and performs at most one bounded repair through the
-native-complete Kilo Nemotron Super profile. The returned envelope is restored to the requested StepFun public
-model. Other models, protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
+constraint, validates the completed object locally, and first checks any empty answer's hidden reasoning for a
+Schema-valid object. If local salvage is unavailable, StepFun retries once with a bounded repair prompt. Other
+models, protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
 
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.

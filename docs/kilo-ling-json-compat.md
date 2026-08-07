@@ -11,15 +11,16 @@
 
 - Removes the unsupported upstream format field only after capturing its intent.
 - First attempt keeps the original conversation and appends a compact final-format constraint.
-- Invalid or empty output gets one repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data.
-- Explicit low output limits use a 256-token first floor and a 1024-token repair-only floor.
-- Ling repairs with the same model. StepFun repairs once through Kilo Nemotron Super because StepFun self-repair can exhaust large output budgets in hidden reasoning; the final response model is always restored to the requested StepFun public model.
+- When visible content is empty, the adapter scans hidden reasoning locally and accepts only a JSON object that passes the requested validation. Reasoning text is never returned.
+- Invalid output that cannot be salvaged gets one same-model repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data.
+- Explicit low output limits use a 256-token first floor. Ling uses a 1024-token repair-only floor; StepFun uses 4096 because its self-repair may consume substantial hidden reasoning.
+- Validated non-stream responses remove reasoning-related fields; SSE emits only canonical JSON content.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.
 
 ## Observability
 
-Journal records use the `kilo_json_compat` prefix with safe request and repair profiles and contain only format, attempts, validation counts, repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, candidate text, headers, credentials, or raw upstream errors.
+Journal records use the `kilo_json_compat` prefix and contain only format, attempts, validation counts, reasoning-salvage/repair/stream flags, schema size, status, error class, and duration. They do not contain prompts, reasoning text, candidate text, headers, credentials, or raw upstream errors.
 
 ## Latest Gate
 

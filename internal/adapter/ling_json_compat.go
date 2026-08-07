@@ -22,8 +22,7 @@ const (
 	lingJSONMaxRepairBytes       = 64 << 10
 	lingJSONFirstOutputFloor     = 256
 	lingJSONRepairOutputFloor    = 1024
-	stepfunJSONRepairModel       = "nvidia/nemotron-3-super-120b-a12b:free"
-	stepfunJSONRepairPublicModel = publicModelPrefix + stepfunJSONRepairModel
+	stepfunJSONRepairOutputFloor = 4096
 	lingJSONMaxAttempts          = 2
 	lingJSONRequestPath          = "/chat/completions"
 	lingJSONObjectFormat         = "json_object"
@@ -45,15 +44,12 @@ type lingJSONSpec struct {
 	PublicModel    string
 	FirstFloor     int
 	RepairFloor    int
-	RepairModel    string
-	RepairProfile  string
 	SchemaRaw      []byte
 	Schema         *jsonschema.Schema
 }
 
 type lingJSONStats struct {
 	Profile           string
-	RepairProfile     string
 	RequestedType     string
 	Attempts          int
 	ValidationFailure int
@@ -62,6 +58,7 @@ type lingJSONStats struct {
 	SchemaBytes       int
 	ErrorClass        string
 	RepairUsed        bool
+	ReasoningSalvaged bool
 	PublicStatus      int
 	Started           time.Time
 }
@@ -101,7 +98,6 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 
 	stats := &lingJSONStats{
 		Profile:        spec.Profile,
-		RepairProfile:  spec.RepairProfile,
 		RequestedType:  spec.Kind,
 		BufferedStream: spec.OriginalStream,
 		SchemaBytes:    len(spec.SchemaRaw),
@@ -153,8 +149,17 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		envelope, canonical, validateErr := validateLingJSONResponse(recorder.body.Bytes(), spec)
 		if validateErr != nil {
 			stats.ValidationFailure++
-			repairCandidate = extractLingJSONCandidate(recorder.body.Bytes())
-			continue
+			if attempt == 1 && spec.Profile == "stepfun" {
+				if salvaged, salvageErr := salvageLingJSONReasoning(envelope, spec); salvageErr == nil {
+					canonical = salvaged
+					validateErr = nil
+					stats.ReasoningSalvaged = true
+				}
+			}
+			if validateErr != nil {
+				repairCandidate = extractLingJSONCandidate(recorder.body.Bytes())
+				continue
+			}
 		}
 
 		stats.Validated = true
@@ -262,10 +267,7 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	spec.FirstFloor = lingJSONFirstOutputFloor
 	spec.RepairFloor = lingJSONRepairOutputFloor
 	if profile == "stepfun" {
-		spec.RepairModel = stepfunJSONRepairPublicModel
-		spec.RepairProfile = "nemotron_super"
-	} else {
-		spec.RepairProfile = "same_model"
+		spec.RepairFloor = stepfunJSONRepairOutputFloor
 	}
 	formatValue, exists := payload["response_format"]
 	if !exists {
@@ -373,9 +375,6 @@ func buildLingJSONRepairBody(original map[string]any, spec lingJSONSpec, candida
 	payload["temperature"] = 0
 	payload["response_format"] = map[string]any{"type": lingJSONObjectFormat}
 	raiseLingJSONOutputFloor(payload, spec.RepairFloor)
-	if spec.RepairModel != "" {
-		payload["model"] = spec.RepairModel
-	}
 
 	messages, _ := payload["messages"].([]any)
 	policyMessages := make([]any, 0, len(messages)+2)
@@ -530,17 +529,112 @@ func validateLingJSONResponse(body []byte, spec lingJSONSpec) (map[string]any, [
 	content := lingJSONContentText(message["content"])
 	value, canonical, err := extractLingJSONObject(content)
 	if err != nil {
-		return nil, nil, err
+		return envelope, nil, err
 	}
-	if spec.Kind == lingJSONSchemaFormat {
-		if spec.Schema == nil {
-			return nil, nil, errors.New("schema unavailable")
-		}
-		if err := spec.Schema.Validate(value); err != nil {
-			return nil, nil, errors.New("schema validation failed")
-		}
+	if err := validateLingJSONObject(value, spec); err != nil {
+		return envelope, nil, err
 	}
 	return envelope, canonical, nil
+}
+
+func salvageLingJSONReasoning(envelope map[string]any, spec lingJSONSpec) ([]byte, error) {
+	choices, ok := envelope["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return nil, errors.New("choices missing")
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return nil, errors.New("choice invalid")
+	}
+	finishReason := strings.ToLower(strings.TrimSpace(fmt.Sprint(choice["finish_reason"])))
+	if finishReason != "length" && finishReason != "max_tokens" {
+		return nil, errors.New("visible content did not end by output limit")
+	}
+	message, ok := choice["message"].(map[string]any)
+	if !ok {
+		return nil, errors.New("message missing")
+	}
+	if strings.TrimSpace(lingJSONContentText(message["content"])) != "" {
+		return nil, errors.New("visible content is not empty")
+	}
+
+	var reasoningParts []string
+	for _, key := range []string{"reasoning", "reasoning_content", "reasoning_details"} {
+		collectLingJSONReasoningText(message[key], &reasoningParts)
+	}
+	var lastCanonical []byte
+	for _, reasoning := range reasoningParts {
+		reasoning = limitLingJSONRepairText(reasoning)
+		for offset := 0; offset < len(reasoning); {
+			index := strings.IndexByte(reasoning[offset:], '{')
+			if index < 0 {
+				break
+			}
+			offset += index
+			value, consumed, decodeErr := decodeLingJSONObjectPrefix(reasoning[offset:])
+			if decodeErr == nil {
+				if validateLingJSONObject(value, spec) == nil {
+					canonical, marshalErr := json.Marshal(value)
+					if marshalErr == nil {
+						lastCanonical = canonical
+					}
+				}
+				if consumed > 0 {
+					offset += consumed
+					continue
+				}
+			}
+			offset++
+		}
+	}
+	if len(lastCanonical) == 0 {
+		return nil, errors.New("validated JSON object missing from reasoning")
+	}
+	return lastCanonical, nil
+}
+
+func decodeLingJSONObjectPrefix(candidate string) (map[string]any, int, error) {
+	decoder := json.NewDecoder(strings.NewReader(candidate))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, 0, err
+	}
+	object, ok := value.(map[string]any)
+	if !ok {
+		return nil, 0, errors.New("JSON value is not an object")
+	}
+	return object, int(decoder.InputOffset()), nil
+}
+
+func collectLingJSONReasoningText(value any, parts *[]string) {
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) != "" {
+			*parts = append(*parts, typed)
+		}
+	case []any:
+		for _, item := range typed {
+			collectLingJSONReasoningText(item, parts)
+		}
+	case map[string]any:
+		for _, key := range []string{"text", "content", "reasoning", "summary"} {
+			collectLingJSONReasoningText(typed[key], parts)
+		}
+	}
+}
+
+func validateLingJSONObject(value map[string]any, spec lingJSONSpec) error {
+	if spec.Kind != lingJSONSchemaFormat {
+		return nil
+	}
+	if spec.Schema == nil {
+		return errors.New("schema unavailable")
+	}
+	if err := spec.Schema.Validate(value); err != nil {
+		return errors.New("schema validation failed")
+	}
+	return nil
 }
 
 func extractLingJSONCandidate(body []byte) string {
@@ -658,7 +752,17 @@ func rewriteLingJSONContent(envelope map[string]any, canonical []byte) ([]byte, 
 		return nil, errors.New("message missing")
 	}
 	message["content"] = string(canonical)
+	choice["finish_reason"] = "stop"
+	stripLingJSONReasoningFields(envelope, choice, message)
 	return json.Marshal(envelope)
+}
+
+func stripLingJSONReasoningFields(objects ...map[string]any) {
+	for _, object := range objects {
+		for _, key := range []string{"reasoning", "reasoning_content", "reasoning_details", "thinking", "analysis"} {
+			delete(object, key)
+		}
+	}
 }
 
 func copyLingJSONBufferedResponse(w http.ResponseWriter, recorder *lingJSONBufferedWriter, body []byte) {
@@ -739,13 +843,13 @@ func logLingJSONCompat(stats *lingJSONStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_json_compat profile=%s repair_backend=%s type=%s attempts=%d validation_failures=%d validated=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t reasoning_salvaged=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
 		stats.Profile,
-		stats.RepairProfile,
 		stats.RequestedType,
 		stats.Attempts,
 		stats.ValidationFailure,
 		stats.Validated,
+		stats.ReasoningSalvaged,
 		stats.RepairUsed,
 		stats.BufferedStream,
 		stats.SchemaBytes,

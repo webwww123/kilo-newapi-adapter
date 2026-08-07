@@ -38,19 +38,32 @@ func lingJSONTestCompletion(t *testing.T, content string) string {
 }
 
 func jsonCompatTestCompletion(t *testing.T, model, content string) string {
+	return jsonCompatTestCompletionWithReasoning(t, model, content, "")
+}
+
+func jsonCompatTestCompletionWithReasoning(t *testing.T, model, content, reasoning string) string {
 	t.Helper()
+	message := map[string]any{
+		"role":    "assistant",
+		"content": content,
+	}
+	if reasoning != "" {
+		message["reasoning"] = reasoning
+		message["reasoning_details"] = []any{map[string]any{"type": "reasoning.text", "text": reasoning}}
+	}
+	finishReason := "stop"
+	if content == "" && reasoning != "" {
+		finishReason = "length"
+	}
 	body, err := json.Marshal(map[string]any{
 		"id":      "chatcmpl-kilo-test",
 		"object":  "chat.completion",
 		"created": 1,
 		"model":   model,
 		"choices": []any{map[string]any{
-			"index": 0,
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": content,
-			},
-			"finish_reason": "stop",
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
 		}},
 	})
 	if err != nil {
@@ -159,11 +172,75 @@ func TestLingJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
 	}
 }
 
+func TestStepFunJSONCompatSalvagesValidatedReasoningWithoutSecondCall(t *testing.T) {
+	const privateMarker = "PRIVATE_REASONING_MARKER"
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		reasoning := privateMarker + ` draft {"status":"wrong","value":8} final {"status":"ok","value":7}`
+		return jsonCompatTestCompletionWithReasoning(t, model, "", reasoning)
+	})
+	defer closeUpstream()
+
+	payload := `{"model":"kilo/stepfun/step-3.7-flash:free","stream":false,"max_tokens":64,"response_format":{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}},"messages":[{"role":"user","content":"Return status ok and value 7."}]}`
+	rec := postJSON(t, handler, "/v1/chat/completions", payload)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"status":"ok","value":7}` {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 || (*calls)[0]["model"] != stepfunFlashFreeModel {
+		t.Fatalf("reasoning salvage made unexpected calls: %#v", *calls)
+	}
+	if strings.Contains(rec.Body.String(), privateMarker) || strings.Contains(rec.Body.String(), `"reasoning"`) || strings.Contains(rec.Body.String(), `"reasoning_details"`) {
+		t.Fatalf("private reasoning leaked: %s", rec.Body.String())
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope["model"] != stepfunJSONPublicModel {
+		t.Fatalf("public model not preserved: %#v", envelope)
+	}
+	choices, _ := envelope["choices"].([]any)
+	if len(choices) == 0 || choices[0].(map[string]any)["finish_reason"] != "stop" {
+		t.Fatalf("salvaged finish reason not normalized: %#v", envelope)
+	}
+}
+
+func TestStepFunJSONCompatReasoningSalvageKeepsTopLevelJSONObject(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		return jsonCompatTestCompletionWithReasoning(t, model, "", `draft {"outer":{"value":7}}`)
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"Return nested data."}]}`)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"outer":{"value":7}}` {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("top-level salvage made unexpected calls: %#v", *calls)
+	}
+}
+
+func TestStepFunReasoningSalvageRequiresOutputLimitFinish(t *testing.T) {
+	envelope := map[string]any{
+		"choices": []any{map[string]any{
+			"finish_reason": "stop",
+			"message": map[string]any{
+				"content":   "",
+				"reasoning": `{"ok":true}`,
+			},
+		}},
+	}
+	if _, err := salvageLingJSONReasoning(envelope, lingJSONSpec{Kind: lingJSONObjectFormat}); err == nil {
+		t.Fatal("reasoning salvage accepted an intentional empty stop response")
+	}
+}
+
 func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T) {
 	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
 		model, _ := payload["model"].(string)
 		if call == 1 {
-			return jsonCompatTestCompletion(t, model, "status ok, value seven")
+			return jsonCompatTestCompletionWithReasoning(t, model, "status ok, value seven", `PRIVATE_NONEMPTY_REASONING {"status":"ok","value":7}`)
 		}
 		return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
 	})
@@ -176,7 +253,7 @@ func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T)
 	if len(*calls) != 2 {
 		t.Fatalf("upstream calls=%d, want 2", len(*calls))
 	}
-	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunJSONRepairModel {
+	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunFlashFreeModel {
 		t.Fatalf("StepFun first/repair models wrong: %#v", *calls)
 	}
 	for index, call := range *calls {
@@ -187,26 +264,25 @@ func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T)
 	if _, exists := (*calls)[0]["response_format"]; exists {
 		t.Fatalf("StepFun first attempt forwarded response_format: %#v", (*calls)[0])
 	}
-	repairFormat, _ := (*calls)[1]["response_format"].(map[string]any)
-	if repairFormat["type"] != lingJSONObjectFormat {
-		t.Fatalf("Nemotron repair format missing: %#v", (*calls)[1])
+	if _, exists := (*calls)[1]["response_format"]; exists {
+		t.Fatalf("StepFun repair forwarded response_format: %#v", (*calls)[1])
 	}
 	firstMessages := (*calls)[0]["messages"].([]any)
 	if !strings.Contains(firstMessages[len(firstMessages)-1].(map[string]any)["content"].(string), "FORMAT REQUIREMENT") {
 		t.Fatalf("first StepFun format constraint missing: %#v", firstMessages)
 	}
 	secondMessages := (*calls)[1]["messages"].([]any)
-	if (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
-		t.Fatalf("StepFun repair floor=%#v, want %d", (*calls)[1]["max_tokens"], lingJSONRepairOutputFloor)
+	if (*calls)[1]["max_tokens"] != float64(stepfunJSONRepairOutputFloor) {
+		t.Fatalf("StepFun repair floor=%#v, want %d", (*calls)[1]["max_tokens"], stepfunJSONRepairOutputFloor)
 	}
-	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") {
+	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), jsonObjectInstruction) {
 		t.Fatalf("StepFun repair instruction missing: %#v", secondMessages)
 	}
 	var envelope map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
 		t.Fatal(err)
 	}
-	if envelope["model"] != stepfunJSONPublicModel || strings.Contains(rec.Body.String(), stepfunJSONRepairModel) {
+	if envelope["model"] != stepfunJSONPublicModel || strings.Contains(rec.Body.String(), "PRIVATE_NONEMPTY_REASONING") || strings.Contains(rec.Body.String(), `"reasoning"`) {
 		t.Fatalf("StepFun public model was not restored: %s", rec.Body.String())
 	}
 }
@@ -232,8 +308,11 @@ func TestStepFunJSONCompatBuffersAndRepairsConflictingStrictSchema(t *testing.T)
 	if len(*calls) != 2 || (*calls)[0]["stream"] != false || (*calls)[1]["stream"] != false {
 		t.Fatalf("StepFun buffered calls wrong: %#v", *calls)
 	}
-	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunJSONRepairModel || strings.Contains(rec.Body.String(), stepfunJSONRepairModel) || !strings.Contains(rec.Body.String(), stepfunJSONPublicModel) {
+	if (*calls)[0]["model"] != stepfunFlashFreeModel || (*calls)[1]["model"] != stepfunFlashFreeModel || !strings.Contains(rec.Body.String(), stepfunJSONPublicModel) {
 		t.Fatalf("StepFun streaming repair model handling wrong: calls=%#v body=%s", *calls, rec.Body.String())
+	}
+	if (*calls)[1]["max_tokens"] != float64(stepfunJSONRepairOutputFloor) {
+		t.Fatalf("StepFun streaming repair floor=%#v, want %d", (*calls)[1]["max_tokens"], stepfunJSONRepairOutputFloor)
 	}
 }
 
@@ -262,6 +341,39 @@ func TestJSONCompatSSEUsesMatchedStepFunModelFallback(t *testing.T) {
 	writeLingJSONSSE(rec, map[string]any{"id": "chatcmpl-fallback", "created": json.Number("1")}, []byte(`{"ok":true}`), stepfunJSONPublicModel)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"model":"kilo/stepfun/step-3.7-flash:free"`) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestJSONCompatRewriteRemovesReasoningAtEveryEnvelopeLevel(t *testing.T) {
+	envelope := map[string]any{
+		"reasoning": "PRIVATE_TOP",
+		"choices": []any{map[string]any{
+			"reasoning":     "PRIVATE_CHOICE",
+			"finish_reason": "length",
+			"message": map[string]any{
+				"role":              "assistant",
+				"content":           "",
+				"reasoning":         "PRIVATE_MESSAGE",
+				"reasoning_details": []any{"PRIVATE_DETAILS"},
+			},
+		}},
+	}
+	rewritten, err := rewriteLingJSONContent(envelope, []byte(`{"ok":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"PRIVATE_TOP", "PRIVATE_CHOICE", "PRIVATE_MESSAGE", "PRIVATE_DETAILS", `"reasoning"`, `"reasoning_details"`} {
+		if strings.Contains(string(rewritten), marker) {
+			t.Fatalf("reasoning marker %q leaked: %s", marker, rewritten)
+		}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(rewritten, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	choice := decoded["choices"].([]any)[0].(map[string]any)
+	if choice["finish_reason"] != "stop" {
+		t.Fatalf("finish reason not normalized: %#v", choice)
 	}
 }
 
