@@ -22,6 +22,7 @@ const (
 	lingJSONMaxRepairBytes       = 64 << 10
 	lingJSONFirstOutputFloor     = 256
 	lingJSONRepairOutputFloor    = 1024
+	stepfunJSONRepairOutputFloor = 4096
 	lingJSONMaxAttempts          = 2
 	lingJSONRequestPath          = "/chat/completions"
 	lingJSONObjectFormat         = "json_object"
@@ -41,6 +42,8 @@ type lingJSONSpec struct {
 	OriginalStream bool
 	Profile        string
 	PublicModel    string
+	FirstFloor     int
+	RepairFloor    int
 	SchemaRaw      []byte
 	Schema         *jsonschema.Schema
 }
@@ -248,6 +251,11 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	}
 	spec.Profile = profile
 	spec.PublicModel = publicModel
+	spec.FirstFloor = lingJSONFirstOutputFloor
+	spec.RepairFloor = lingJSONRepairOutputFloor
+	if profile == "stepfun" {
+		spec.RepairFloor = stepfunJSONRepairOutputFloor
+	}
 	formatValue, exists := payload["response_format"]
 	if !exists {
 		return payload, spec, false, nil
@@ -328,7 +336,7 @@ func buildLingJSONFirstBody(original map[string]any, spec lingJSONSpec) ([]byte,
 	delete(payload, "stream_options")
 	payload["stream"] = false
 	payload["n"] = 1
-	raiseLingJSONOutputFloor(payload, lingJSONFirstOutputFloor)
+	raiseLingJSONOutputFloor(payload, spec.FirstFloor)
 	messages, ok := payload["messages"].([]any)
 	if !ok || len(messages) == 0 {
 		return nil, errors.New("messages missing")
@@ -353,7 +361,7 @@ func buildLingJSONRepairBody(original map[string]any, spec lingJSONSpec, candida
 	payload["n"] = 1
 	payload["temperature"] = 0
 	payload["response_format"] = map[string]any{"type": lingJSONObjectFormat}
-	raiseLingJSONOutputFloor(payload, lingJSONRepairOutputFloor)
+	raiseLingJSONOutputFloor(payload, spec.RepairFloor)
 
 	messages, _ := payload["messages"].([]any)
 	policyMessages := make([]any, 0, len(messages)+2)

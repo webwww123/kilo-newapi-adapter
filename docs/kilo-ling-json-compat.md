@@ -12,7 +12,7 @@
 - Removes the unsupported upstream format field only after capturing its intent.
 - First attempt keeps the original conversation and appends a compact final-format constraint.
 - Invalid or empty output gets one repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data.
-- Explicit low output limits use a 256-token first floor and a 1024-token repair-only floor.
+- Explicit low output limits use a 256-token first floor. Ling keeps its proven 1024-token repair-only floor; StepFun uses a 4096-token repair-only floor because lower limits can be exhausted by hidden reasoning before any visible JSON is emitted.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.
 

@@ -188,6 +188,9 @@ func TestStepFunJSONCompatRepairsJSONObjectAndStripsUpstreamFormat(t *testing.T)
 		t.Fatalf("first StepFun format constraint missing: %#v", firstMessages)
 	}
 	secondMessages := (*calls)[1]["messages"].([]any)
+	if (*calls)[1]["max_tokens"] != float64(stepfunJSONRepairOutputFloor) {
+		t.Fatalf("StepFun repair floor=%#v, want %d", (*calls)[1]["max_tokens"], stepfunJSONRepairOutputFloor)
+	}
 	if len(secondMessages) < 2 || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), "JSON REPAIR TASK") || !strings.Contains(secondMessages[0].(map[string]any)["content"].(string), jsonObjectInstruction) {
 		t.Fatalf("StepFun repair/downgrade instructions missing: %#v", secondMessages)
 	}
