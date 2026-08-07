@@ -16,23 +16,24 @@ import (
 )
 
 const (
-	lingJSONPublicModel          = publicModelPrefix + lingFlashFreeModel
-	lingTinyJSONPublicModel      = publicModelPrefix + lingTinyFreeModel
-	stepfunJSONPublicModel       = publicModelPrefix + stepfunFlashFreeModel
-	kiloAutoFreeModel            = "kilo-auto/free"
-	kiloAutoJSONPublicModel      = publicModelPrefix + kiloAutoFreeModel
-	nemotronUltraFreeModel       = "nvidia/nemotron-3-ultra-550b-a55b:free"
-	nemotronUltraJSONPublicModel = publicModelPrefix + nemotronUltraFreeModel
-	lingJSONMaxSchemaBytes       = 64 << 10
-	lingJSONMaxRepairBytes       = 64 << 10
-	lingJSONFirstOutputFloor     = 256
-	lingJSONRepairOutputFloor    = 1024
-	stepfunJSONRepairOutputFloor = 4096
-	lingJSONMaxAttempts          = 2
-	lingJSONRequestPath          = "/chat/completions"
-	lingJSONObjectFormat         = "json_object"
-	lingJSONSchemaFormat         = "json_schema"
-	lingJSONValidationErrorClass = "validation_failed"
+	lingJSONPublicModel           = publicModelPrefix + lingFlashFreeModel
+	lingTinyJSONPublicModel       = publicModelPrefix + lingTinyFreeModel
+	stepfunJSONPublicModel        = publicModelPrefix + stepfunFlashFreeModel
+	kiloAutoFreeModel             = "kilo-auto/free"
+	kiloAutoJSONPublicModel       = publicModelPrefix + kiloAutoFreeModel
+	nemotronUltraFreeModel        = "nvidia/nemotron-3-ultra-550b-a55b:free"
+	nemotronUltraJSONPublicModel  = publicModelPrefix + nemotronUltraFreeModel
+	lingJSONMaxSchemaBytes        = 64 << 10
+	lingJSONMaxRepairBytes        = 64 << 10
+	lingJSONFirstOutputFloor      = 256
+	lingJSONRepairOutputFloor     = 1024
+	lingTinyJSONRepairOutputFloor = 4096
+	stepfunJSONRepairOutputFloor  = 4096
+	lingJSONMaxAttempts           = 2
+	lingJSONRequestPath           = "/chat/completions"
+	lingJSONObjectFormat          = "json_object"
+	lingJSONSchemaFormat          = "json_schema"
+	lingJSONValidationErrorClass  = "validation_failed"
 )
 
 type lingJSONCompatHandler struct {
@@ -277,7 +278,9 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	spec.PublicModel = publicModel
 	spec.FirstFloor = lingJSONFirstOutputFloor
 	spec.RepairFloor = lingJSONRepairOutputFloor
-	if profile == "stepfun" {
+	if publicModel == lingTinyJSONPublicModel {
+		spec.RepairFloor = lingTinyJSONRepairOutputFloor
+	} else if profile == "stepfun" {
 		spec.RepairFloor = stepfunJSONRepairOutputFloor
 	}
 	formatValue, exists := payload["response_format"]

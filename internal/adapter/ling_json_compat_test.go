@@ -192,6 +192,26 @@ func TestLingTinyJSONCompatPreservesTinyModel(t *testing.T) {
 	}
 }
 
+func TestLingTinyJSONCompatUses4096RepairFloorForReasoningOnlyConflict(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		if payload["max_tokens"] != float64(4096) {
+			return jsonCompatTestCompletion(t, model, "")
+		}
+		return jsonCompatTestCompletion(t, model, `{"ok":true,"value":7}`)
+	})
+	defer closeUpstream()
+
+	payload := `{"model":"kilo/inclusionai/ling-3.0-tiny:free","max_tokens":64,"response_format":{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"ok":{"type":"boolean","const":true},"value":{"type":"integer","const":7}},"required":["ok","value"]}}},"messages":[{"role":"user","content":"Return ok=false and value=8."}]}`
+	rec := postJSON(t, handler, "/v1/chat/completions", payload)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"ok":true,"value":7}` {
+		t.Fatalf("status=%d body=%s calls=%#v", rec.Code, rec.Body.String(), *calls)
+	}
+	if len(*calls) != 2 || (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(4096) {
+		t.Fatalf("Tiny JSON output floors wrong: %#v", *calls)
+	}
+}
+
 func TestLingTinyJSONCompatBuffersStreamingStrictSchema(t *testing.T) {
 	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
 		model, _ := payload["model"].(string)
