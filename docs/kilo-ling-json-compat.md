@@ -2,17 +2,17 @@
 
 ## Scope
 
-- Models: `kilo/inclusionai/ling-3.0-flash:free` and `kilo/stepfun/step-3.7-flash:free` (prefixed or unprefixed internal forms).
+- Models: `kilo/inclusionai/ling-3.0-flash:free`, `kilo/stepfun/step-3.7-flash:free`, `kilo/kilo-auto/free`, and `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` (prefixed or unprefixed internal forms).
 - Endpoint: OpenAI Chat Completions only.
 - Formats: `json_object` and local strict `json_schema` validation.
 - Ordinary requests, other models, Responses, Messages, and tools without `response_format` are unchanged.
 
 ## Behavior
 
-- Removes the unsupported upstream format field only after capturing its intent.
+- Removes the unsupported upstream format field only after capturing its intent. Kilo Auto and Nemotron Ultra also omit it on the repair attempt so an unsupported native parameter cannot create an embedded HTTP-200 error envelope.
 - First attempt keeps the original conversation and appends a compact final-format constraint.
-- When visible content is empty, the adapter scans hidden reasoning locally and accepts only a JSON object that passes the requested validation. Reasoning text is never returned.
-- Invalid output that cannot be salvaged gets one same-model repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data.
+- For StepFun only, when visible content is empty the adapter scans hidden reasoning locally and accepts only a JSON object that passes the requested validation. Reasoning text is never returned.
+- Invalid output that cannot be salvaged gets one same-model repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data. Nemotron Ultra also uses that one repair turn when its first structured attempt is reshaped into HTTP 400/500 from an embedded upstream error.
 - Explicit low output limits use a 256-token first floor. Ling uses a 1024-token repair-only floor; StepFun uses 4096 because its self-repair may consume substantial hidden reasoning.
 - Validated non-stream responses remove reasoning-related fields; SSE emits only canonical JSON content.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
@@ -27,3 +27,5 @@ Journal records use the `kilo_json_compat` prefix and contain only format, attem
 On 2026-08-06, the Ling isolated and live-wrapper gates covered ordinary chat, object/schema modes, empty-candidate reconstruction, non-streaming and streaming. Every 2xx structured response validated; accepted failures were upstream errors/timeouts rather than local JSON validation failures.
 
 On 2026-08-07, StepFun was added after direct native probes repeatedly returned HTTP 400 for `json_object` and violated conflicting strict Schemas. Its focused local gate covers object repair, strict-Schema repair, buffered streaming, ordinary tools, combined tool/format rejection, and public-model preservation.
+
+Kilo Auto and Nemotron Ultra were later scoped from the full-site audit. Auto violated conflicting object and Schema instructions; Ultra produced embedded error envelopes for conflicting object and ordinary Schema requests. Both reuse the same bounded, same-model validation and repair path while ordinary requests and tools remain unchanged.

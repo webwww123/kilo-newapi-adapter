@@ -18,6 +18,10 @@ import (
 const (
 	lingJSONPublicModel          = publicModelPrefix + lingFlashFreeModel
 	stepfunJSONPublicModel       = publicModelPrefix + stepfunFlashFreeModel
+	kiloAutoFreeModel            = "kilo-auto/free"
+	kiloAutoJSONPublicModel      = publicModelPrefix + kiloAutoFreeModel
+	nemotronUltraFreeModel       = "nvidia/nemotron-3-ultra-550b-a55b:free"
+	nemotronUltraJSONPublicModel = publicModelPrefix + nemotronUltraFreeModel
 	lingJSONMaxSchemaBytes       = 64 << 10
 	lingJSONMaxRepairBytes       = 64 << 10
 	lingJSONFirstOutputFloor     = 256
@@ -49,18 +53,19 @@ type lingJSONSpec struct {
 }
 
 type lingJSONStats struct {
-	Profile           string
-	RequestedType     string
-	Attempts          int
-	ValidationFailure int
-	Validated         bool
-	BufferedStream    bool
-	SchemaBytes       int
-	ErrorClass        string
-	RepairUsed        bool
-	ReasoningSalvaged bool
-	PublicStatus      int
-	Started           time.Time
+	Profile            string
+	RequestedType      string
+	Attempts           int
+	ValidationFailure  int
+	Validated          bool
+	BufferedStream     bool
+	SchemaBytes        int
+	ErrorClass         string
+	RepairUsed         bool
+	ReasoningSalvaged  bool
+	UpstreamErrorRetry bool
+	PublicStatus       int
+	Started            time.Time
 }
 
 type lingJSONBufferedWriter struct {
@@ -140,6 +145,11 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		h.base.ServeHTTP(recorder, attemptRequest)
 		status := recorder.Status()
 		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			if attempt == 1 && spec.Profile == "nemotron_ultra" && (status == http.StatusBadRequest || status == http.StatusInternalServerError) {
+				stats.UpstreamErrorRetry = true
+				repairCandidate = ""
+				continue
+			}
 			stats.ErrorClass = "upstream_error"
 			stats.PublicStatus = status
 			copyLingJSONBufferedResponse(w, recorder, recorder.body.Bytes())
@@ -318,6 +328,10 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "ling", lingJSONPublicModel, true
 	case stepfunJSONPublicModel, stepfunFlashFreeModel:
 		return "stepfun", stepfunJSONPublicModel, true
+	case kiloAutoJSONPublicModel, kiloAutoFreeModel:
+		return "kilo_auto", kiloAutoJSONPublicModel, true
+	case nemotronUltraJSONPublicModel, nemotronUltraFreeModel:
+		return "nemotron_ultra", nemotronUltraJSONPublicModel, true
 	default:
 		return "", "", false
 	}
@@ -373,7 +387,11 @@ func buildLingJSONRepairBody(original map[string]any, spec lingJSONSpec, candida
 	payload["stream"] = false
 	payload["n"] = 1
 	payload["temperature"] = 0
-	payload["response_format"] = map[string]any{"type": lingJSONObjectFormat}
+	if spec.Profile == "ling" || spec.Profile == "stepfun" {
+		payload["response_format"] = map[string]any{"type": lingJSONObjectFormat}
+	} else {
+		delete(payload, "response_format")
+	}
 	raiseLingJSONOutputFloor(payload, spec.RepairFloor)
 
 	messages, _ := payload["messages"].([]any)
@@ -843,7 +861,7 @@ func logLingJSONCompat(stats *lingJSONStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t reasoning_salvaged=%t repair_used=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t reasoning_salvaged=%t repair_used=%t upstream_error_retried=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
 		stats.Profile,
 		stats.RequestedType,
 		stats.Attempts,
@@ -851,6 +869,7 @@ func logLingJSONCompat(stats *lingJSONStats) {
 		stats.Validated,
 		stats.ReasoningSalvaged,
 		stats.RepairUsed,
+		stats.UpstreamErrorRetry,
 		stats.BufferedStream,
 		stats.SchemaBytes,
 		stats.ErrorClass,

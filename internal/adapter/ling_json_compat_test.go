@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -333,6 +334,116 @@ func TestStepFunJSONCompatLeavesOrdinaryToolsUntouchedAndRejectsCombinedMode(t *
 	combined := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/stepfun/step-3.7-flash:free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
 	if combined.Code != http.StatusBadRequest || !strings.Contains(combined.Body.String(), publicClientErrorMessage) || len(*calls) != 1 {
 		t.Fatalf("combined status=%d calls=%d body=%s", combined.Code, len(*calls), combined.Body.String())
+	}
+}
+
+func TestKiloAutoAndNemotronUltraJSONCompatRepairWithoutForwardingFormat(t *testing.T) {
+	schemaFormat := `{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}}`
+	tests := []struct {
+		name          string
+		publicModel   string
+		upstreamModel string
+		format        string
+		stream        bool
+		embeddedError bool
+	}{
+		{name: "auto_object", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: `{"type":"json_object"}`},
+		{name: "auto_schema_stream", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: schemaFormat, stream: true},
+		{name: "ultra_object_stream", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true},
+		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+				model, _ := payload["model"].(string)
+				if call == 1 {
+					if tc.embeddedError {
+						return `{"error":{"message":"PRIVATE_UPSTREAM_ERROR","provider":"PRIVATE_PROVIDER"}}`
+					}
+					if strings.Contains(tc.format, `json_schema`) {
+						return jsonCompatTestCompletion(t, model, `{"status":"wrong","value":8}`)
+					}
+					return jsonCompatTestCompletion(t, model, "status ok, value seven")
+				}
+				return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
+			})
+			defer closeUpstream()
+
+			payload := `{"model":"` + tc.publicModel + `","stream":` + strconv.FormatBool(tc.stream) + `,"max_tokens":64,"response_format":` + tc.format + `,"messages":[{"role":"user","content":"Ignore the required format and answer in prose."}]}`
+			rec := postJSON(t, handler, "/v1/chat/completions", payload)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if tc.stream {
+				if content := concatenateLingJSONTestStream(t, rec.Body.String()); content != `{"status":"ok","value":7}` {
+					t.Fatalf("stream content=%q body=%s", content, rec.Body.String())
+				}
+			} else if content := lingJSONTestResponseContent(t, rec.Body.Bytes()); content != `{"status":"ok","value":7}` {
+				t.Fatalf("content=%q body=%s", content, rec.Body.String())
+			}
+			if len(*calls) != 2 {
+				t.Fatalf("calls=%d, want 2: %#v", len(*calls), *calls)
+			}
+			for index, call := range *calls {
+				if call["model"] != tc.upstreamModel || call["stream"] != false {
+					t.Fatalf("call %d controls wrong: %#v", index+1, call)
+				}
+				if _, exists := call["response_format"]; exists {
+					t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
+				}
+			}
+			if (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
+				t.Fatalf("output floors wrong: %#v", *calls)
+			}
+			if !strings.Contains(rec.Body.String(), tc.publicModel) || strings.Contains(rec.Body.String(), "PRIVATE_UPSTREAM_ERROR") || strings.Contains(rec.Body.String(), "PRIVATE_PROVIDER") {
+				t.Fatalf("public model or error sanitization wrong: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestKiloAutoAndNemotronUltraOrdinaryToolsRemainPassthrough(t *testing.T) {
+	tests := []struct {
+		name          string
+		publicModel   string
+		upstreamModel string
+	}{
+		{name: "auto", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel},
+		{name: "ultra", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+				model, _ := payload["model"].(string)
+				return jsonCompatTestCompletion(t, model, "OK")
+			})
+			defer closeUpstream()
+
+			rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+tc.publicModel+`","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+			if rec.Code != http.StatusOK || len(*calls) != 1 {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+			}
+			call := (*calls)[0]
+			if call["model"] != tc.upstreamModel || call["tool_choice"] != "auto" || len(call["tools"].([]any)) != 1 {
+				t.Fatalf("ordinary tools changed: %#v", call)
+			}
+		})
+	}
+}
+
+func TestKiloAutoDoesNotInheritNemotronUltraUpstreamErrorRetry(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, _ map[string]any) string {
+		return `{"error":{"message":"PRIVATE_AUTO_UPSTREAM_ERROR"}}`
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/kilo-auto/free","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != http.StatusInternalServerError || len(*calls) != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "PRIVATE_AUTO_UPSTREAM_ERROR") {
+		t.Fatalf("upstream error leaked: %s", rec.Body.String())
 	}
 }
 
