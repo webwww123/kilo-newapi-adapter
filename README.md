@@ -61,7 +61,8 @@ REQUEST_LOG_BODY_LIMIT=1048576
 
 ## Public Error Policy
 
-- Every client-visible 4xx response is collapsed to HTTP 400 with `400 请求无法处理，请检查请求参数或稍后重试。`.
+- Upstream HTTP 451 review blocks are returned as HTTP 450 with `触发审查，请重试`.
+- Every other client-visible 4xx response is collapsed to HTTP 400 with `400 请求无法处理，请检查请求参数或稍后重试。`.
 - Every client-visible 5xx response is collapsed to HTTP 500 with `500 请求无法处理，请检查请求参数或稍后重试。`.
 - HTTP 200 error envelopes and SSE error events use the same generic 500 message.
 - Original adapter and upstream error details remain in the root-only request log for internal debugging and are never returned to clients.

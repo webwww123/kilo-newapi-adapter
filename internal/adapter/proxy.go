@@ -15,7 +15,9 @@ import (
 
 const (
 	publicModelPrefix        = "kilo/"
+	publicReviewStatus       = 450
 	publicClientErrorMessage = "400 请求无法处理，请检查请求参数或稍后重试。"
+	publicReviewErrorMessage = "触发审查，请重试"
 	publicServerErrorMessage = "500 请求无法处理，请检查请求参数或稍后重试。"
 )
 
@@ -669,6 +671,9 @@ func meaningfulErrorValue(value any) bool {
 }
 
 func normalizePublicErrorStatus(status int) int {
+	if status == http.StatusUnavailableForLegalReasons || status == publicReviewStatus {
+		return publicReviewStatus
+	}
 	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
 		return http.StatusBadRequest
 	}
@@ -676,10 +681,14 @@ func normalizePublicErrorStatus(status int) int {
 }
 
 func publicErrorMessage(status int) string {
-	if normalizePublicErrorStatus(status) == http.StatusBadRequest {
+	switch normalizePublicErrorStatus(status) {
+	case publicReviewStatus:
+		return publicReviewErrorMessage
+	case http.StatusBadRequest:
 		return publicClientErrorMessage
+	default:
+		return publicServerErrorMessage
 	}
-	return publicServerErrorMessage
 }
 
 func publicErrorBody(upstreamPath string, status int) []byte {

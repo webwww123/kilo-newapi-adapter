@@ -416,6 +416,7 @@ func TestModelsErrorsUseGenericPublicMessages(t *testing.T) {
 		wantMessage    string
 	}{
 		{upstreamStatus: http.StatusNotFound, wantStatus: http.StatusBadRequest, wantMessage: publicClientErrorMessage},
+		{upstreamStatus: http.StatusUnavailableForLegalReasons, wantStatus: publicReviewStatus, wantMessage: publicReviewErrorMessage},
 		{upstreamStatus: http.StatusServiceUnavailable, wantStatus: http.StatusInternalServerError, wantMessage: publicServerErrorMessage},
 	}
 
@@ -776,6 +777,14 @@ func TestProxyReturnsGenericPublicErrorsAcrossProtocols(t *testing.T) {
 			wantMessage:    publicClientErrorMessage,
 		},
 		{
+			name:           "messages upstream 451 becomes 450",
+			path:           "/v1/messages",
+			requestBody:    `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`,
+			upstreamStatus: http.StatusUnavailableForLegalReasons,
+			wantStatus:     publicReviewStatus,
+			wantMessage:    publicReviewErrorMessage,
+		},
+		{
 			name:           "responses upstream 503 becomes 500",
 			path:           "/v1/responses",
 			requestBody:    `{"model":"kilo/public-model","input":"hi"}`,
@@ -813,13 +822,15 @@ func TestProxyReturnsGenericPublicErrorsAcrossProtocols(t *testing.T) {
 
 func TestNormalizePublicErrorStatus(t *testing.T) {
 	tests := map[int]int{
-		http.StatusBadRequest:          http.StatusBadRequest,
-		http.StatusUnauthorized:        http.StatusBadRequest,
-		http.StatusTooManyRequests:     http.StatusBadRequest,
-		http.StatusInternalServerError: http.StatusInternalServerError,
-		http.StatusBadGateway:          http.StatusInternalServerError,
-		http.StatusServiceUnavailable:  http.StatusInternalServerError,
-		http.StatusFound:               http.StatusInternalServerError,
+		http.StatusBadRequest:                 http.StatusBadRequest,
+		http.StatusUnauthorized:               http.StatusBadRequest,
+		publicReviewStatus:                    publicReviewStatus,
+		http.StatusUnavailableForLegalReasons: publicReviewStatus,
+		http.StatusTooManyRequests:            http.StatusBadRequest,
+		http.StatusInternalServerError:        http.StatusInternalServerError,
+		http.StatusBadGateway:                 http.StatusInternalServerError,
+		http.StatusServiceUnavailable:         http.StatusInternalServerError,
+		http.StatusFound:                      http.StatusInternalServerError,
 	}
 	for input, want := range tests {
 		if got := normalizePublicErrorStatus(input); got != want {
