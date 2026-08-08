@@ -3,30 +3,44 @@ package adapter
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 )
 
 const (
-	publicModelPrefix        = "kilo/"
-	publicReviewStatus       = 450
-	publicClientErrorMessage = "400 请求无法处理，请检查请求参数或稍后重试。"
-	publicReviewErrorMessage = "触发审查，请重试"
-	publicServerErrorMessage = "500 请求无法处理，请检查请求参数或稍后重试。"
+	publicModelPrefix           = "kilo/"
+	publicReviewStatus          = 450
+	publicClientErrorMessage    = "400 请求无法处理，请检查请求参数或稍后重试。"
+	publicRateLimitErrorMessage = "429 请求过于频繁，请稍后重试。"
+	publicReviewErrorMessage    = "触发审查，请重试"
+	publicServerErrorMessage    = "500 请求无法处理，请检查请求参数或稍后重试。"
+	lingTiny429RetryBudget      = 30 * time.Second
 )
 
+var lingTiny429RetryBackoff = [...]time.Duration{3 * time.Second, 7 * time.Second, 20 * time.Second}
+
 type Handler struct {
-	cfg    Config
-	logger *requestLogger
+	cfg         Config
+	logger      *requestLogger
+	retryWait   func(context.Context, time.Duration) error
+	retryJitter func(time.Duration) time.Duration
 }
 
 func NewHandler(cfg Config) http.Handler {
+	base := newBaseHandler(cfg)
+	return newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+}
+
+func newBaseHandler(cfg Config) *Handler {
 	cfg = cfg.WithDefaults()
 	var logger *requestLogger
 	if cfg.RequestLogEnabled || strings.TrimSpace(cfg.RequestLogDir) != "" {
@@ -39,8 +53,12 @@ func NewHandler(cfg Config) http.Handler {
 			fmt.Printf("request_log_cleanup_error=%v\n", err)
 		}
 	}
-	base := &Handler{cfg: cfg, logger: logger}
-	return newLingJSONCompatHandler(base, cfg.MaxBodyBytes)
+	return &Handler{
+		cfg:         cfg,
+		logger:      logger,
+		retryWait:   waitForRetry,
+		retryJitter: defaultRetryJitter,
+	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -304,7 +322,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	resp, err := h.forward(r, upstreamPath, bytes.NewReader(body))
+	resp, err := h.forwardWithLingTiny429Retry(r, upstreamPath, body, publicRequestModel)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
@@ -674,6 +692,9 @@ func normalizePublicErrorStatus(status int) int {
 	if status == http.StatusUnavailableForLegalReasons || status == publicReviewStatus {
 		return publicReviewStatus
 	}
+	if status == http.StatusTooManyRequests {
+		return http.StatusTooManyRequests
+	}
 	if status >= http.StatusBadRequest && status < http.StatusInternalServerError {
 		return http.StatusBadRequest
 	}
@@ -684,6 +705,8 @@ func publicErrorMessage(status int) string {
 	switch normalizePublicErrorStatus(status) {
 	case publicReviewStatus:
 		return publicReviewErrorMessage
+	case http.StatusTooManyRequests:
+		return publicRateLimitErrorMessage
 	case http.StatusBadRequest:
 		return publicClientErrorMessage
 	default:
@@ -696,7 +719,9 @@ func publicErrorBody(upstreamPath string, status int) []byte {
 	message := publicErrorMessage(publicStatus)
 	if upstreamPath == "/messages" {
 		errorType := "invalid_request_error"
-		if publicStatus == http.StatusInternalServerError {
+		if publicStatus == http.StatusTooManyRequests {
+			errorType = "rate_limit_error"
+		} else if publicStatus == http.StatusInternalServerError {
 			errorType = "api_error"
 		}
 		body, _ := json.Marshal(map[string]any{
@@ -710,7 +735,9 @@ func publicErrorBody(upstreamPath string, status int) []byte {
 	}
 
 	errorType := "invalid_request_error"
-	if publicStatus == http.StatusInternalServerError {
+	if publicStatus == http.StatusTooManyRequests {
+		errorType = "rate_limit_error"
+	} else if publicStatus == http.StatusInternalServerError {
 		errorType = "server_error"
 	}
 	body, _ := json.Marshal(map[string]any{
@@ -850,6 +877,136 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 	}
 
 	return h.cfg.HTTPClient.Do(req)
+}
+
+func (h *Handler) forwardWithLingTiny429Retry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
+	if publicModel != prefixPublicModel(lingTinyFreeModel) {
+		return h.forward(original, upstreamPath, bytes.NewReader(body))
+	}
+
+	totalWait := time.Duration(0)
+	for attempt := 0; ; attempt++ {
+		resp, err := h.forward(original, upstreamPath, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusTooManyRequests || attempt >= len(lingTiny429RetryBackoff) {
+			return resp, nil
+		}
+
+		delay, ok := lingTiny429RetryDelay(
+			attempt,
+			resp.Header.Get("Retry-After"),
+			time.Now(),
+			totalWait,
+			h.retryJitter,
+		)
+		if !ok {
+			return resp, nil
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+
+		fmt.Printf("kilo_upstream_retry path=%s model=%s retry=%d max_retries=%d status=%d wait_ms=%d retry_after_present=%t\n",
+			upstreamPath,
+			publicModel,
+			attempt+1,
+			len(lingTiny429RetryBackoff),
+			http.StatusTooManyRequests,
+			delay.Milliseconds(),
+			strings.TrimSpace(resp.Header.Get("Retry-After")) != "",
+		)
+
+		wait := h.retryWait
+		if wait == nil {
+			wait = waitForRetry
+		}
+		if err := wait(original.Context(), delay); err != nil {
+			return nil, err
+		}
+		totalWait += delay
+	}
+}
+
+func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds >= 0 {
+		maxSeconds := int64(lingTiny429RetryBudget / time.Second)
+		if seconds > maxSeconds {
+			seconds = maxSeconds
+		}
+		return time.Duration(seconds) * time.Second, true
+	}
+	when, err := http.ParseTime(raw)
+	if err != nil {
+		return 0, false
+	}
+	delay := when.Sub(now)
+	if delay < 0 {
+		delay = 0
+	}
+	if delay > lingTiny429RetryBudget {
+		delay = lingTiny429RetryBudget
+	}
+	return delay, true
+}
+
+func lingTiny429RetryDelay(retryIndex int, retryAfter string, now time.Time, totalWait time.Duration, jitter func(time.Duration) time.Duration) (time.Duration, bool) {
+	if retryIndex < 0 || retryIndex >= len(lingTiny429RetryBackoff) || totalWait >= lingTiny429RetryBudget {
+		return 0, false
+	}
+
+	base := lingTiny429RetryBackoff[retryIndex]
+	delay := base
+	if jitter != nil {
+		if extra := jitter(base); extra > 0 {
+			delay += extra
+		}
+	}
+	if requested, ok := parseRetryAfter(retryAfter, now); ok && requested > delay {
+		delay = requested
+	}
+
+	remaining := lingTiny429RetryBudget - totalWait
+	if delay > remaining {
+		delay = remaining
+	}
+	return delay, true
+}
+
+func defaultRetryJitter(base time.Duration) time.Duration {
+	maxJitter := base / 5
+	if maxJitter <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(maxJitter) + 1))
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func normalizePath(path string) string {

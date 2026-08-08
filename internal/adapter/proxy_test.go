@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type upstreamCall struct {
@@ -61,6 +63,17 @@ func newTestHandler(upstreamURL string) http.Handler {
 		UpstreamBaseURL: upstreamURL,
 	}
 	return NewHandler(cfg)
+}
+
+func newRetryTestHandler(t *testing.T, upstreamURL string, wait func(context.Context, time.Duration) error) http.Handler {
+	t.Helper()
+	base := newBaseHandler(Config{
+		UpstreamBaseURL: upstreamURL,
+		RequestLogDir:   t.TempDir(),
+	})
+	base.retryWait = wait
+	base.retryJitter = func(time.Duration) time.Duration { return 0 }
+	return newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
 }
 
 func postJSON(t *testing.T, handler http.Handler, path string, body string) *httptest.ResponseRecorder {
@@ -751,6 +764,262 @@ func TestProxyFailsClosedForSSEErrorAndNonJSONData(t *testing.T) {
 	}
 }
 
+func TestLingTinyRetriesThreeUpstream429sAcrossProtocolsAndStreamModes(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		body   string
+		stream bool
+	}{
+		{name: "chat non-stream", path: "/v1/chat/completions", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "chat stream", path: "/v1/chat/completions", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","stream":true,"messages":[{"role":"user","content":"hi"}]}`, stream: true},
+		{name: "messages non-stream", path: "/v1/messages", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "messages stream", path: "/v1/messages", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`, stream: true},
+		{name: "responses non-stream", path: "/v1/responses", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","input":"hi"}`},
+		{name: "responses stream", path: "/v1/responses", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","stream":true,"input":"hi"}`, stream: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int
+			var bodies [][]byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				bodies = append(bodies, append([]byte(nil), raw...))
+				calls++
+				if calls <= 3 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					_, _ = io.WriteString(w, `{"error":{"message":"PRIVATE_RATE_LIMIT"}}`)
+					return
+				}
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"id\":\"ok\",\"model\":\"inclusionai/ling-3.0-tiny:free\",\"choices\":[]}\n\ndata: [DONE]\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"ok","model":"inclusionai/ling-3.0-tiny:free","choices":[]}`)
+			}))
+			defer upstream.Close()
+
+			var waits []time.Duration
+			handler := newRetryTestHandler(t, upstream.URL, func(ctx context.Context, delay time.Duration) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				waits = append(waits, delay)
+				return nil
+			})
+			rec := postJSON(t, handler, tc.path, tc.body)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if calls != 4 {
+				t.Fatalf("upstream calls = %d, want 4", calls)
+			}
+			wantWaits := []time.Duration{3 * time.Second, 7 * time.Second, 20 * time.Second}
+			if len(waits) != len(wantWaits) {
+				t.Fatalf("waits = %v, want %v", waits, wantWaits)
+			}
+			for i := range wantWaits {
+				if waits[i] != wantWaits[i] {
+					t.Fatalf("wait %d = %v, want %v", i+1, waits[i], wantWaits[i])
+				}
+			}
+			for i := 1; i < len(bodies); i++ {
+				if !bytes.Equal(bodies[0], bodies[i]) {
+					t.Fatalf("retry body %d differs from initial body", i+1)
+				}
+			}
+		})
+	}
+}
+
+func TestLingTinyStopsAfterThree429RetriesAndReturnsSanitized429(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{name: "chat", path: "/v1/chat/completions", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":"hi"}]}`},
+		{name: "messages", path: "/v1/messages", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`},
+		{name: "responses", path: "/v1/responses", body: `{"model":"kilo/inclusionai/ling-3.0-tiny:free","input":"hi"}`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				if calls == 4 {
+					w.Header().Set("Retry-After", "17")
+				}
+				w.WriteHeader(http.StatusTooManyRequests)
+				_, _ = io.WriteString(w, `{"error":{"message":"PRIVATE_RATE_LIMIT","provider":"PRIVATE_PROVIDER"}}`)
+			}))
+			defer upstream.Close()
+
+			waits := 0
+			handler := newRetryTestHandler(t, upstream.URL, func(context.Context, time.Duration) error {
+				waits++
+				return nil
+			})
+			rec := postJSON(t, handler, tc.path, tc.body)
+
+			if calls != 4 || waits != 3 {
+				t.Fatalf("calls = %d, waits = %d; want 4 calls and 3 waits", calls, waits)
+			}
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want 429; body = %s", rec.Code, rec.Body.String())
+			}
+			if got := rec.Header().Get("Retry-After"); got != "17" {
+				t.Fatalf("Retry-After = %q, want 17", got)
+			}
+			if !strings.Contains(rec.Body.String(), publicRateLimitErrorMessage) {
+				t.Fatalf("generic rate-limit message missing: %s", rec.Body.String())
+			}
+			var payload struct {
+				Error struct {
+					Type string `json:"type"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil || payload.Error.Type != "rate_limit_error" {
+				t.Fatalf("rate-limit error shape invalid: err=%v body=%s", err, rec.Body.String())
+			}
+			for _, leaked := range []string{"PRIVATE_RATE_LIMIT", "PRIVATE_PROVIDER"} {
+				if strings.Contains(rec.Body.String(), leaked) {
+					t.Fatalf("rate-limit response leaked %q: %s", leaked, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+func TestNonTiny429AndLocalTiny400AreNotRetried(t *testing.T) {
+	t.Run("non-tiny upstream 429", func(t *testing.T) {
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		defer upstream.Close()
+
+		waits := 0
+		handler := newRetryTestHandler(t, upstream.URL, func(context.Context, time.Duration) error {
+			waits++
+			return nil
+		})
+		rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-flash:free","messages":[{"role":"user","content":"hi"}]}`)
+		if rec.Code != http.StatusTooManyRequests || calls != 1 || waits != 0 {
+			t.Fatalf("status = %d, calls = %d, waits = %d", rec.Code, calls, waits)
+		}
+	})
+
+	t.Run("local Tiny image rejection", func(t *testing.T) {
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer upstream.Close()
+
+		waits := 0
+		handler := newRetryTestHandler(t, upstream.URL, func(context.Context, time.Duration) error {
+			waits++
+			return nil
+		})
+		rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]}`)
+		if rec.Code != http.StatusBadRequest || calls != 0 || waits != 0 {
+			t.Fatalf("status = %d, calls = %d, waits = %d", rec.Code, calls, waits)
+		}
+	})
+
+	t.Run("local Tiny context rejection", func(t *testing.T) {
+		withContextTrimProfile(t, lingTinyFreeModel, contextTrimProfile{ContextLimit: 3000})
+		calls := 0
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer upstream.Close()
+
+		waits := 0
+		handler := newRetryTestHandler(t, upstream.URL, func(context.Context, time.Duration) error {
+			waits++
+			return nil
+		})
+		body := fmt.Sprintf(`{
+			"model":"kilo/%s",
+			"messages":[
+				{"role":"system","content":"keep"},
+				{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+				{"role":"user","content":%q}
+			],
+			"max_tokens":512
+		}`, lingTinyFreeModel, strings.Repeat("x", 12000))
+		rec := postJSON(t, handler, "/v1/chat/completions", body)
+		if rec.Code != http.StatusBadRequest || calls != 0 || waits != 0 {
+			t.Fatalf("status = %d, calls = %d, waits = %d", rec.Code, calls, waits)
+		}
+	})
+}
+
+func TestLingTiny429RetryStopsWhenRequestContextIsCanceled(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer upstream.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	waits := 0
+	handler := newRetryTestHandler(t, upstream.URL, func(waitCtx context.Context, _ time.Duration) error {
+		waits++
+		cancel()
+		return waitCtx.Err()
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"kilo/inclusionai/ling-3.0-tiny:free","messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if calls != 1 || waits != 1 {
+		t.Fatalf("calls = %d, waits = %d; want one of each", calls, waits)
+	}
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want sanitized 500", rec.Code)
+	}
+}
+
+func TestLingTiny429RetryAfterParsingAndBudget(t *testing.T) {
+	now := time.Date(2026, time.August, 8, 8, 0, 0, 0, time.UTC)
+	if got, ok := parseRetryAfter("12", now); !ok || got != 12*time.Second {
+		t.Fatalf("delta Retry-After = %v, %t; want 12s, true", got, ok)
+	}
+	httpDate := now.Add(9 * time.Second).Format(http.TimeFormat)
+	if got, ok := parseRetryAfter(httpDate, now); !ok || got != 9*time.Second {
+		t.Fatalf("date Retry-After = %v, %t; want 9s, true", got, ok)
+	}
+	if _, ok := parseRetryAfter("not-a-delay", now); ok {
+		t.Fatal("invalid Retry-After unexpectedly parsed")
+	}
+
+	zeroJitter := func(time.Duration) time.Duration { return 0 }
+	if got, ok := lingTiny429RetryDelay(0, "12", now, 0, zeroJitter); !ok || got != 12*time.Second {
+		t.Fatalf("Retry-After delay = %v, %t; want 12s, true", got, ok)
+	}
+	if got, ok := lingTiny429RetryDelay(2, "", now, 29*time.Second, zeroJitter); !ok || got != time.Second {
+		t.Fatalf("budget-clamped delay = %v, %t; want 1s, true", got, ok)
+	}
+	if _, ok := lingTiny429RetryDelay(2, "", now, 30*time.Second, zeroJitter); ok {
+		t.Fatal("retry allowed after total wait budget was exhausted")
+	}
+}
+
 func TestProxyReturnsGenericPublicErrorsAcrossProtocols(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -761,12 +1030,12 @@ func TestProxyReturnsGenericPublicErrorsAcrossProtocols(t *testing.T) {
 		wantMessage    string
 	}{
 		{
-			name:           "chat upstream 429 becomes 400",
+			name:           "chat upstream 429 stays 429",
 			path:           "/v1/chat/completions",
 			requestBody:    `{"model":"kilo/public-model","messages":[{"role":"user","content":"hi"}]}`,
 			upstreamStatus: http.StatusTooManyRequests,
-			wantStatus:     http.StatusBadRequest,
-			wantMessage:    publicClientErrorMessage,
+			wantStatus:     http.StatusTooManyRequests,
+			wantMessage:    publicRateLimitErrorMessage,
 		},
 		{
 			name:           "messages upstream 401 becomes 400",
@@ -826,7 +1095,7 @@ func TestNormalizePublicErrorStatus(t *testing.T) {
 		http.StatusUnauthorized:               http.StatusBadRequest,
 		publicReviewStatus:                    publicReviewStatus,
 		http.StatusUnavailableForLegalReasons: publicReviewStatus,
-		http.StatusTooManyRequests:            http.StatusBadRequest,
+		http.StatusTooManyRequests:            http.StatusTooManyRequests,
 		http.StatusInternalServerError:        http.StatusInternalServerError,
 		http.StatusBadGateway:                 http.StatusInternalServerError,
 		http.StatusServiceUnavailable:         http.StatusInternalServerError,
