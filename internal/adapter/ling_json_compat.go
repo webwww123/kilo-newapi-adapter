@@ -30,6 +30,7 @@ const (
 	lingTinyJSONSchemaFirstFloor  = 1024
 	lingTinyJSONRepairOutputFloor = 4096
 	stepfunJSONRepairOutputFloor  = 4096
+	kiloAutoJSONRepairOutputFloor = 4096
 	lingJSONMaxAttempts           = 2
 	lingJSONRequestPath           = "/chat/completions"
 	lingJSONObjectFormat          = "json_object"
@@ -162,7 +163,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		envelope, canonical, validateErr := validateLingJSONResponse(recorder.body.Bytes(), spec)
 		if validateErr != nil {
 			stats.ValidationFailure++
-			if attempt == 1 && spec.Profile == "stepfun" {
+			if attempt == 1 && (spec.Profile == "stepfun" || spec.Profile == "kilo_auto") {
 				if salvaged, salvageErr := salvageLingJSONReasoning(envelope, spec); salvageErr == nil {
 					canonical = salvaged
 					validateErr = nil
@@ -283,6 +284,8 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 		spec.RepairFloor = lingTinyJSONRepairOutputFloor
 	} else if profile == "stepfun" {
 		spec.RepairFloor = stepfunJSONRepairOutputFloor
+	} else if profile == "kilo_auto" {
+		spec.RepairFloor = kiloAutoJSONRepairOutputFloor
 	}
 	formatValue, exists := payload["response_format"]
 	if !exists {

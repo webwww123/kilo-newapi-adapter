@@ -11,9 +11,9 @@
 
 - Removes the unsupported upstream format field only after capturing its intent. Kilo Auto and Nemotron Ultra also omit it on the repair attempt so an unsupported native parameter cannot create an embedded HTTP-200 error envelope.
 - First attempt keeps the original conversation and appends a compact final-format constraint.
-- For StepFun only, when visible content is empty the adapter scans hidden reasoning locally and accepts only a JSON object that passes the requested validation. Reasoning text is never returned.
+- For StepFun and Kilo Auto only, when visible content is empty the adapter scans hidden reasoning locally and accepts only a JSON object that passes the requested validation. Reasoning text is never returned.
 - Invalid output that cannot be salvaged gets one same-model repair turn that preserves system/developer policy and treats the original user request and candidate as quoted inert data. Nemotron Ultra also uses that one repair turn when its first structured attempt is reshaped into HTTP 400/500 from an embedded upstream error.
-- Explicit low output limits use a 256-token first floor. Ling uses a 1024-token repair-only floor; StepFun uses 4096 because its self-repair may consume substantial hidden reasoning.
+- Explicit low output limits use a 256-token first floor. Ling and Nemotron Ultra use a 1024-token repair-only floor; StepFun and Kilo Auto use 4096 because their fallback may consume substantial hidden reasoning.
 - Validated non-stream responses remove reasoning-related fields; SSE emits only canonical JSON content.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.

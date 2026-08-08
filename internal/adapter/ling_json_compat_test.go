@@ -478,11 +478,12 @@ func TestKiloAutoAndNemotronUltraJSONCompatRepairWithoutForwardingFormat(t *test
 		format        string
 		stream        bool
 		embeddedError bool
+		repairFloor   int
 	}{
-		{name: "auto_object", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: `{"type":"json_object"}`},
-		{name: "auto_schema_stream", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: schemaFormat, stream: true},
-		{name: "ultra_object_stream", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true},
-		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true},
+		{name: "auto_object", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: `{"type":"json_object"}`, repairFloor: kiloAutoJSONRepairOutputFloor},
+		{name: "auto_schema_stream", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: schemaFormat, stream: true, repairFloor: kiloAutoJSONRepairOutputFloor},
+		{name: "ultra_object_stream", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
 	}
 
 	for _, tc := range tests {
@@ -525,13 +526,34 @@ func TestKiloAutoAndNemotronUltraJSONCompatRepairWithoutForwardingFormat(t *test
 					t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
 				}
 			}
-			if (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
+			if (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(tc.repairFloor) {
 				t.Fatalf("output floors wrong: %#v", *calls)
 			}
 			if !strings.Contains(rec.Body.String(), tc.publicModel) || strings.Contains(rec.Body.String(), "PRIVATE_UPSTREAM_ERROR") || strings.Contains(rec.Body.String(), "PRIVATE_PROVIDER") {
 				t.Fatalf("public model or error sanitization wrong: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestKiloAutoJSONCompatSalvagesValidatedReasoningWithoutSecondCall(t *testing.T) {
+	const privateMarker = "PRIVATE_AUTO_REASONING"
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		return jsonCompatTestCompletionWithReasoning(t, model, "", privateMarker+` draft {"ok":false,"value":8} final {"ok":true,"value":7}`)
+	})
+	defer closeUpstream()
+
+	payload := `{"model":"kilo/kilo-auto/free","response_format":{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"ok":{"type":"boolean","const":true},"value":{"type":"integer","const":7}},"required":["ok","value"]}}},"messages":[{"role":"user","content":"return data"}]}`
+	rec := postJSON(t, handler, "/v1/chat/completions", payload)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != `{"ok":true,"value":7}` {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 || (*calls)[0]["model"] != kiloAutoFreeModel {
+		t.Fatalf("Auto reasoning salvage made unexpected calls: %#v", *calls)
+	}
+	if strings.Contains(rec.Body.String(), privateMarker) || strings.Contains(rec.Body.String(), `"reasoning"`) || strings.Contains(rec.Body.String(), `"reasoning_details"`) || !strings.Contains(rec.Body.String(), kiloAutoJSONPublicModel) {
+		t.Fatalf("Auto reasoning or model leaked: %s", rec.Body.String())
 	}
 }
 
