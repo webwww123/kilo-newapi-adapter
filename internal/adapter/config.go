@@ -22,6 +22,8 @@ type Config struct {
 	RequestLogDir       string
 	RequestLogRetention time.Duration
 	RequestLogBodyLimit int64
+
+	KiloAutoReliabilityEnabled bool
 }
 
 func ConfigFromEnv() Config {
@@ -36,6 +38,10 @@ func ConfigFromEnv() Config {
 		RequestLogDir:       strings.TrimSpace(os.Getenv("REQUEST_LOG_DIR")),
 		RequestLogRetention: parseDuration(os.Getenv("REQUEST_LOG_RETENTION"), 48*time.Hour),
 		RequestLogBodyLimit: parseInt64(os.Getenv("REQUEST_LOG_BODY_LIMIT"), 1<<20),
+		KiloAutoReliabilityEnabled: parseBool(
+			os.Getenv("KILO_AUTO_RELIABILITY_ENABLED"),
+			false,
+		),
 		HTTPClient: &http.Client{
 			Timeout: parseDuration(os.Getenv("UPSTREAM_TIMEOUT"), 180*time.Second),
 		},

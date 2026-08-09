@@ -55,6 +55,7 @@ REQUEST_LOG_ENABLED=true
 REQUEST_LOG_DIR=/var/log/kilo-newapi-adapter
 REQUEST_LOG_RETENTION=48h
 REQUEST_LOG_BODY_LIMIT=1048576
+KILO_AUTO_RELIABILITY_ENABLED=false
 ```
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
@@ -74,6 +75,7 @@ Context trimming is intentionally limited to manually profiled free models. Paid
 The trim policy keeps system/developer items, the originating user request, and the newest completed tool turn first. OpenAI `assistant.tool_calls` plus `tool` results, Anthropic `tool_use` plus `tool_result` blocks, and Responses `function_call` plus `function_call_output` items are retained atomically. Oversized newest tool results are truncated while preserving both edges before older conversation turns are considered. If the required current tool structure still cannot fit, the adapter leaves the original request history intact so the upstream can return an explicit context error instead of receiving stale partial history.
 
 Current free-model profiles are maintained in `internal/adapter/context_trim.go`. `stepfun/step-3.7-flash:free` follows the local Yingweida CPA middleware profile: 262144 context, no safety margin, and 220000 max input tokens.
+`kilo-auto/free` uses its advertised 256000 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-tiny:free` uses its advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
 
@@ -99,6 +101,14 @@ explicit Chat Completions object/Schema requests, removes the unsupported upstre
 constraint, validates the completed object locally, and first checks any empty answer's hidden reasoning for a
 Schema-valid object. If local salvage is unavailable, StepFun retries once with a bounded repair prompt. Other
 models, protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
+
+When `KILO_AUTO_RELIABILITY_ENABLED=true`, ordinary OpenAI Chat requests for `kilo/kilo-auto/free` use a model-scoped visible-output guard. The default is `false`, so deploying a new binary does not activate the prototype without an explicit service configuration change. No-tool first attempts receive a maximum hidden-reasoning budget of 512 tokens unless the client already selected a lower limit or explicitly disabled reasoning; successful tool requests remain unchanged. A non-stream response that is empty, lacks a finish reason, or ends by output length is held locally and repaired once with a 256-token reasoning budget, a 10000-token output floor, and a compact completeness reminder. A second unusable answer becomes the existing generic public 500 instead of leaking reasoning-only output.
+
+For ordinary Auto streaming, the adapter holds at most the first 1 MiB until visible content or a tool-call delta appears. It then commits immediately and never retries after meaningful data is emitted. If the stream ends before meaningful data, the first attempt is discarded and repaired once; policy/error events are not retried. Structured JSON streaming keeps using the separate validated JSON compatibility path described above.
+
+Before public error normalization, Auto Chat retries pre-header transport failures and raw upstream HTTP 429/502/503/504 only. The shared request budget allows at most two raw retries with 1-second and 3-second backoff plus jitter, honors `Retry-After` within a 15-second total wait budget, and is shared with the semantic repair attempt. HTTP 400/413/450/451 and raw 500 are never retried. The combined worst case is four upstream calls for one client request; ordinary successful requests still use one.
+
+Body-free structural journal records use `kilo_auto_reliability` for semantic decisions and `kilo_upstream_retry scope=auto` for raw transient retries. They include only stream/attempt/retry/status/timing fields and never contain prompts, candidates, reasoning text, tool arguments, headers, or credentials.
 
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.

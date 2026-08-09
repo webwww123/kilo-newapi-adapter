@@ -68,8 +68,9 @@ func newTestHandler(upstreamURL string) http.Handler {
 func newRetryTestHandler(t *testing.T, upstreamURL string, wait func(context.Context, time.Duration) error) http.Handler {
 	t.Helper()
 	base := newBaseHandler(Config{
-		UpstreamBaseURL: upstreamURL,
-		RequestLogDir:   t.TempDir(),
+		UpstreamBaseURL:            upstreamURL,
+		RequestLogDir:              t.TempDir(),
+		KiloAutoReliabilityEnabled: true,
 	})
 	base.retryWait = wait
 	base.retryJitter = func(time.Duration) time.Duration { return 0 }

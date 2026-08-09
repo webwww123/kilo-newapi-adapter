@@ -24,9 +24,11 @@ const (
 	publicReviewErrorMessage    = "触发审查，请重试"
 	publicServerErrorMessage    = "500 请求无法处理，请检查请求参数或稍后重试。"
 	lingTiny429RetryBudget      = 30 * time.Second
+	kiloAutoRetryBudget         = 15 * time.Second
 )
 
 var lingTiny429RetryBackoff = [...]time.Duration{3 * time.Second, 7 * time.Second, 20 * time.Second}
+var kiloAutoRetryBackoff = [...]time.Duration{time.Second, 3 * time.Second}
 
 type Handler struct {
 	cfg         Config
@@ -37,7 +39,11 @@ type Handler struct {
 
 func NewHandler(cfg Config) http.Handler {
 	base := newBaseHandler(cfg)
-	return newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+	jsonCompat := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+	if !base.cfg.KiloAutoReliabilityEnabled {
+		return jsonCompat
+	}
+	return newKiloAutoReliabilityHandler(jsonCompat, base.cfg.MaxBodyBytes)
 }
 
 func newBaseHandler(cfg Config) *Handler {
@@ -322,7 +328,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 
-	resp, err := h.forwardWithLingTiny429Retry(r, upstreamPath, body, publicRequestModel)
+	resp, err := h.forwardWithModelRetry(r, upstreamPath, body, publicRequestModel)
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "upstream_error", "upstream request failed")
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
@@ -879,10 +885,17 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 	return h.cfg.HTTPClient.Do(req)
 }
 
-func (h *Handler) forwardWithLingTiny429Retry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
-	if publicModel != prefixPublicModel(lingTinyFreeModel) {
-		return h.forward(original, upstreamPath, bytes.NewReader(body))
+func (h *Handler) forwardWithModelRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
+	if publicModel == prefixPublicModel(lingTinyFreeModel) {
+		return h.forwardWithLingTiny429Retry(original, upstreamPath, body, publicModel)
 	}
+	if h.cfg.KiloAutoReliabilityEnabled && publicModel == kiloAutoJSONPublicModel && upstreamPath == lingJSONRequestPath {
+		return h.forwardWithKiloAutoRetry(original, upstreamPath, body, publicModel)
+	}
+	return h.forward(original, upstreamPath, bytes.NewReader(body))
+}
+
+func (h *Handler) forwardWithLingTiny429Retry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
 
 	totalWait := time.Duration(0)
 	for attempt := 0; ; attempt++ {
@@ -929,13 +942,115 @@ func (h *Handler) forwardWithLingTiny429Retry(original *http.Request, upstreamPa
 	}
 }
 
+func (h *Handler) forwardWithKiloAutoRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
+	state := kiloAutoRetryStateFromContext(original.Context())
+	localRetries := 0
+	localWait := time.Duration(0)
+	for {
+		resp, err := h.forward(original, upstreamPath, bytes.NewReader(body))
+		if err != nil {
+			retryIndex, totalWait := kiloAutoRetryProgress(state, localRetries, localWait)
+			if retryIndex >= len(kiloAutoRetryBackoff) {
+				return nil, err
+			}
+			delay, ok := kiloAutoRetryDelay(retryIndex, "", time.Now(), totalWait, h.retryJitter)
+			if !ok {
+				return nil, err
+			}
+			fmt.Printf("kilo_upstream_retry scope=auto path=%s model=%s retry=%d max_retries=%d status=transport wait_ms=%d retry_after_present=false\n",
+				upstreamPath,
+				publicModel,
+				retryIndex+1,
+				len(kiloAutoRetryBackoff),
+				delay.Milliseconds(),
+			)
+			if waitErr := h.waitBeforeRetry(original.Context(), delay); waitErr != nil {
+				return nil, waitErr
+			}
+			recordKiloAutoRetryProgress(state, &localRetries, &localWait, delay)
+			continue
+		}
+
+		retryIndex, totalWait := kiloAutoRetryProgress(state, localRetries, localWait)
+		if !isKiloAutoRetryableStatus(resp.StatusCode) || retryIndex >= len(kiloAutoRetryBackoff) {
+			return resp, nil
+		}
+		delay, ok := kiloAutoRetryDelay(
+			retryIndex,
+			resp.Header.Get("Retry-After"),
+			time.Now(),
+			totalWait,
+			h.retryJitter,
+		)
+		if !ok {
+			return resp, nil
+		}
+		if resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+
+		fmt.Printf("kilo_upstream_retry scope=auto path=%s model=%s retry=%d max_retries=%d status=%d wait_ms=%d retry_after_present=%t\n",
+			upstreamPath,
+			publicModel,
+			retryIndex+1,
+			len(kiloAutoRetryBackoff),
+			resp.StatusCode,
+			delay.Milliseconds(),
+			strings.TrimSpace(resp.Header.Get("Retry-After")) != "",
+		)
+
+		if err := h.waitBeforeRetry(original.Context(), delay); err != nil {
+			return nil, err
+		}
+		recordKiloAutoRetryProgress(state, &localRetries, &localWait, delay)
+	}
+}
+
+func kiloAutoRetryProgress(state *kiloAutoRetryState, localRetries int, localWait time.Duration) (int, time.Duration) {
+	if state != nil {
+		return state.rawRetries, state.totalWait
+	}
+	return localRetries, localWait
+}
+
+func recordKiloAutoRetryProgress(state *kiloAutoRetryState, localRetries *int, localWait *time.Duration, delay time.Duration) {
+	if state != nil {
+		state.rawRetries++
+		state.totalWait += delay
+		return
+	}
+	(*localRetries)++
+	*localWait += delay
+}
+
+func (h *Handler) waitBeforeRetry(ctx context.Context, delay time.Duration) error {
+	wait := h.retryWait
+	if wait == nil {
+		wait = waitForRetry
+	}
+	return wait(ctx, delay)
+}
+
+func isKiloAutoRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
 func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
+	return parseRetryAfterWithBudget(raw, now, lingTiny429RetryBudget)
+}
+
+func parseRetryAfterWithBudget(raw string, now time.Time, budget time.Duration) (time.Duration, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, false
 	}
 	if seconds, err := strconv.ParseInt(raw, 10, 64); err == nil && seconds >= 0 {
-		maxSeconds := int64(lingTiny429RetryBudget / time.Second)
+		maxSeconds := int64(budget / time.Second)
 		if seconds > maxSeconds {
 			seconds = maxSeconds
 		}
@@ -949,8 +1064,29 @@ func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
 	if delay < 0 {
 		delay = 0
 	}
-	if delay > lingTiny429RetryBudget {
-		delay = lingTiny429RetryBudget
+	if delay > budget {
+		delay = budget
+	}
+	return delay, true
+}
+
+func kiloAutoRetryDelay(retryIndex int, retryAfter string, now time.Time, totalWait time.Duration, jitter func(time.Duration) time.Duration) (time.Duration, bool) {
+	if retryIndex < 0 || retryIndex >= len(kiloAutoRetryBackoff) || totalWait >= kiloAutoRetryBudget {
+		return 0, false
+	}
+	base := kiloAutoRetryBackoff[retryIndex]
+	delay := base
+	if jitter != nil {
+		if extra := jitter(base); extra > 0 {
+			delay += extra
+		}
+	}
+	if requested, ok := parseRetryAfterWithBudget(retryAfter, now, kiloAutoRetryBudget); ok && requested > delay {
+		delay = requested
+	}
+	remaining := kiloAutoRetryBudget - totalWait
+	if delay > remaining {
+		delay = remaining
 	}
 	return delay, true
 }
