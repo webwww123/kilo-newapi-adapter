@@ -46,7 +46,7 @@ channel_profile:
 
 - No-tool first attempts receive `reasoning.max_tokens=512` when absent or higher. Lower explicit limits and explicit reasoning disablement are preserved.
 - Tool-bearing first attempts remain unchanged so the proven native tool path is protected.
-- A repair keeps the full original conversation, tools, tool controls, and system/developer policy. It inserts one system completeness reminder before developer/user turns, sets `reasoning.max_tokens=256`, uses deterministic temperature, and raises only the repair output budget.
+- A repair keeps the full original conversation, tools, tool controls, and system/developer policy. It inserts one system completeness reminder before developer/user turns, appends a new final user retry instruction to encourage a fresh Auto route, sets `reasoning.max_tokens=256`, uses deterministic temperature, and raises only the repair output budget.
 - Raw retries replay the exact normalized body. Raw retry allowance is shared across the first and repair attempt, preventing layered retry amplification.
 
 ## Response behavior
@@ -55,11 +55,11 @@ channel_profile:
 - Content-policy/safety finish reasons are returned without semantic retry.
 - Streaming holds a bounded prelude until the first visible content or tool-call delta. Once committed, the request is never replayed.
 - A wholly empty/reasoning-only stream may be repaired once before headers or meaningful bytes are committed.
-- Error events, policy finishes, non-SSE responses, and prelude buffers exceeding 1 MiB are not semantically retried.
+- Error events, policy finishes, and non-SSE responses are not semantically retried. A prelude exceeding 1 MiB is discarded before commitment and follows the same single-repair/error path as a wholly empty stream.
 - Repair exhaustion returns the existing protocol-shaped generic public 500.
 
 ## Observability
 
-- `kilo_auto_reliability`: stream flag, attempt count, repair usage, reasoning-cap decision, failure classes, final status, commit state, forced-prelude commit, and duration.
+- `kilo_auto_reliability`: stream flag, attempt count, repair usage, reasoning-cap decision, failure classes, final status, commit state, prelude overflow, and duration.
 - `kilo_upstream_retry scope=auto`: path, public model, retry index, raw status or transport class, wait duration, and whether `Retry-After` was present.
 - Neither log line contains request/response bodies, prompt text, hidden reasoning, candidate answers, tool names/arguments, headers, or credentials.

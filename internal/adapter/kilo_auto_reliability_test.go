@@ -408,7 +408,7 @@ func TestKiloAutoStreamPreludeDetectsSplitMeaningfulDelta(t *testing.T) {
 	}
 }
 
-func TestKiloAutoStreamPreludeForcesBoundedCommit(t *testing.T) {
+func TestKiloAutoStreamPreludeFailsClosedOnBoundedOverflow(t *testing.T) {
 	rec := httptest.NewRecorder()
 	gate := newKiloAutoStreamPreludeWriter(rec, 32)
 	gate.Header().Set("Content-Type", "text/event-stream")
@@ -417,8 +417,28 @@ func TestKiloAutoStreamPreludeForcesBoundedCommit(t *testing.T) {
 	if _, err := gate.Write([]byte(line)); err != nil {
 		t.Fatal(err)
 	}
-	if !gate.committed || !gate.forcedCommit || gate.meaningful {
-		t.Fatalf("bounded prelude did not force commit: committed=%t forced=%t meaningful=%t", gate.committed, gate.forcedCommit, gate.meaningful)
+	if gate.committed || !gate.overflow || gate.meaningful || rec.Body.Len() != 0 {
+		t.Fatalf("bounded prelude did not fail closed: committed=%t overflow=%t meaningful=%t body=%s", gate.committed, gate.overflow, gate.meaningful, rec.Body.String())
+	}
+}
+
+func TestKiloAutoReliabilityRepairsOverflowingStreamWithoutLeakingPrelude(t *testing.T) {
+	privatePrelude := "PRIVATE_OVERFLOW_" + strings.Repeat("x", kiloAutoStreamPreludeBytes+1024)
+	handler, calls, closeUpstream := newKiloAutoReliabilityTestHandler(t, func(call int, _ map[string]any, w http.ResponseWriter) {
+		if call == 1 {
+			writeKiloAutoSSE(w, "", privatePrelude, "length")
+			return
+		}
+		writeKiloAutoSSE(w, "OK", "", "stop")
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/kilo-auto/free","stream":true,"messages":[{"role":"user","content":"write code"}]}`)
+	if rec.Code != http.StatusOK || len(*calls) != 2 || !strings.Contains(rec.Body.String(), `"content":"OK"`) {
+		t.Fatalf("status=%d calls=%d body_len=%d", rec.Code, len(*calls), rec.Body.Len())
+	}
+	if strings.Contains(rec.Body.String(), "PRIVATE_OVERFLOW") {
+		t.Fatalf("overflowing prelude leaked, body_len=%d", rec.Body.Len())
 	}
 }
 
@@ -452,10 +472,10 @@ func TestKiloAutoRepairPreservesSystemAndDeveloperPolicyOrder(t *testing.T) {
 		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
 	}
 	messages := (*calls)[1]["messages"].([]any)
-	if len(messages) != 4 {
+	if len(messages) != 5 {
 		t.Fatalf("repair messages=%#v", messages)
 	}
-	wantRoles := []string{"system", "system", "developer", "user"}
+	wantRoles := []string{"system", "system", "developer", "user", "user"}
 	for i, want := range wantRoles {
 		message := messages[i].(map[string]any)
 		if message["role"] != want {
@@ -465,6 +485,9 @@ func TestKiloAutoRepairPreservesSystemAndDeveloperPolicyOrder(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(messages[0].(map[string]any)["content"]), "SYSTEM_POLICY") ||
 		!strings.Contains(fmt.Sprint(messages[2].(map[string]any)["content"]), "DEVELOPER_POLICY") {
 		t.Fatalf("policy messages changed: %#v", messages)
+	}
+	if !strings.Contains(fmt.Sprint(messages[4].(map[string]any)["content"]), "Retry the immediately preceding request") {
+		t.Fatalf("final retry user turn missing: %#v", messages)
 	}
 }
 

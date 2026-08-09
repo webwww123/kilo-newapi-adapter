@@ -19,6 +19,7 @@ const (
 	kiloAutoRepairOutputTokens    = 10000
 	kiloAutoStreamPreludeBytes    = 1 << 20
 	kiloAutoRepairInstruction     = "Reliability retry: provide a concise, complete visible answer or a valid tool call. Do not spend the response budget on hidden analysis. If code is requested, return the complete code."
+	kiloAutoRepairUserInstruction = "Retry the immediately preceding request now. Return a concise, complete visible final answer, or a valid tool call if tools are needed. Do not repeat hidden analysis."
 )
 
 type kiloAutoReliabilityHandler struct {
@@ -34,16 +35,16 @@ type kiloAutoRetryState struct {
 }
 
 type kiloAutoReliabilityStats struct {
-	Stream             bool
-	Attempts           int
-	RepairUsed         bool
-	FirstReasoningCap  bool
-	FirstFailureClass  string
-	FinalFailureClass  string
-	FinalStatus        int
-	StreamCommitted    bool
-	StreamForcedCommit bool
-	Started            time.Time
+	Stream                bool
+	Attempts              int
+	RepairUsed            bool
+	FirstReasoningCap     bool
+	FirstFailureClass     string
+	FinalFailureClass     string
+	FinalStatus           int
+	StreamCommitted       bool
+	StreamPreludeOverflow bool
+	Started               time.Time
 }
 
 type kiloAutoResponseAssessment struct {
@@ -226,10 +227,11 @@ func buildKiloAutoRepairBody(original map[string]any) ([]byte, error) {
 		}
 		insertAt++
 	}
-	repaired := make([]any, 0, len(messages)+1)
+	repaired := make([]any, 0, len(messages)+2)
 	repaired = append(repaired, messages[:insertAt]...)
 	repaired = append(repaired, map[string]any{"role": "system", "content": kiloAutoRepairInstruction})
 	repaired = append(repaired, messages[insertAt:]...)
+	repaired = append(repaired, map[string]any{"role": "user", "content": kiloAutoRepairUserInstruction})
 	payload["messages"] = repaired
 	return json.Marshal(payload)
 }
@@ -404,7 +406,7 @@ type kiloAutoStreamPreludeWriter struct {
 	limit        int
 	committed    bool
 	meaningful   bool
-	forcedCommit bool
+	overflow     bool
 	errorEvent   bool
 	policyFinish bool
 	finish       string
@@ -431,16 +433,21 @@ func (w *kiloAutoStreamPreludeWriter) Write(data []byte) (int, error) {
 	if w.committed {
 		return w.dst.Write(data)
 	}
-	_, _ = w.pending.Write(data)
+	if !w.overflow {
+		_, _ = w.pending.Write(data)
+	}
 	_, _ = w.scan.Write(data)
 	w.scanLines()
-	if w.meaningful || w.pending.Len() >= w.limit {
-		if !w.meaningful {
-			w.forcedCommit = true
-		}
+	if w.overflow {
+		return len(data), nil
+	}
+	if w.meaningful {
 		if err := w.Commit(); err != nil {
 			return len(data), err
 		}
+	} else if w.pending.Len() >= w.limit {
+		w.overflow = true
+		w.pending.Reset()
 	}
 	return len(data), nil
 }
@@ -538,9 +545,19 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoStream(w http.ResponseWriter, 
 	stats.Attempts = 1
 	stats.FinalStatus = first.Status()
 	stats.StreamCommitted = first.committed
-	stats.StreamForcedCommit = first.forcedCommit
+	stats.StreamPreludeOverflow = first.overflow
 	if first.committed {
 		stats.FinalFailureClass = "committed"
+		return
+	}
+	if first.overflow && (first.errorEvent || first.policyFinish) {
+		status := http.StatusInternalServerError
+		if first.policyFinish {
+			status = publicReviewStatus
+		}
+		stats.FinalFailureClass = "overflow_not_retryable"
+		stats.FinalStatus = status
+		writePublicErrorResponse(w, status, lingJSONRequestPath)
 		return
 	}
 	if first.Status() < http.StatusOK || first.Status() >= http.StatusMultipleChoices || !isEventStreamResponse(first.header) || first.errorEvent || first.policyFinish {
@@ -550,6 +567,9 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoStream(w http.ResponseWriter, 
 	}
 
 	stats.FirstFailureClass = "empty_visible_stream"
+	if first.overflow {
+		stats.FirstFailureClass = "prelude_overflow"
+	}
 	repairBody, err := buildKiloAutoRepairBody(original)
 	if err != nil {
 		stats.FinalFailureClass = "repair_build_failed"
@@ -563,9 +583,19 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoStream(w http.ResponseWriter, 
 	stats.Attempts = 2
 	stats.FinalStatus = second.Status()
 	stats.StreamCommitted = second.committed
-	stats.StreamForcedCommit = second.forcedCommit
+	stats.StreamPreludeOverflow = stats.StreamPreludeOverflow || second.overflow
 	if second.committed {
 		stats.FinalFailureClass = "ok"
+		return
+	}
+	if second.overflow && (second.errorEvent || second.policyFinish) {
+		status := http.StatusInternalServerError
+		if second.policyFinish {
+			status = publicReviewStatus
+		}
+		stats.FinalFailureClass = "overflow_not_retryable"
+		stats.FinalStatus = status
+		writePublicErrorResponse(w, status, lingJSONRequestPath)
 		return
 	}
 	if second.Status() < http.StatusOK || second.Status() >= http.StatusMultipleChoices || !isEventStreamResponse(second.header) || second.errorEvent || second.policyFinish {
@@ -575,6 +605,9 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoStream(w http.ResponseWriter, 
 	}
 
 	stats.FinalFailureClass = "empty_visible_stream"
+	if second.overflow {
+		stats.FinalFailureClass = "prelude_overflow"
+	}
 	stats.FinalStatus = http.StatusInternalServerError
 	writePublicErrorResponse(w, http.StatusInternalServerError, lingJSONRequestPath)
 }
@@ -583,7 +616,7 @@ func logKiloAutoReliability(stats *kiloAutoReliabilityStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_auto_reliability stream=%t attempts=%d repair_used=%t first_reasoning_cap=%t first_failure=%s final_failure=%s final_status=%d stream_committed=%t forced_commit=%t duration_ms=%d\n",
+	fmt.Printf("kilo_auto_reliability stream=%t attempts=%d repair_used=%t first_reasoning_cap=%t first_failure=%s final_failure=%s final_status=%d stream_committed=%t prelude_overflow=%t duration_ms=%d\n",
 		stats.Stream,
 		stats.Attempts,
 		stats.RepairUsed,
@@ -592,7 +625,7 @@ func logKiloAutoReliability(stats *kiloAutoReliabilityStats) {
 		stats.FinalFailureClass,
 		stats.FinalStatus,
 		stats.StreamCommitted,
-		stats.StreamForcedCommit,
+		stats.StreamPreludeOverflow,
 		time.Since(stats.Started).Milliseconds(),
 	)
 }
