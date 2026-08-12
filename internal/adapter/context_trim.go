@@ -11,9 +11,11 @@ import (
 const contextTrimOverheadTokens = 2048
 
 type contextTrimProfile struct {
-	ContextLimit   int
-	SafetyMargin   int
-	MaxInputTokens int
+	ContextLimit        int
+	SafetyMargin        int
+	MaxInputTokens      int
+	DefaultOutputTokens int
+	MaxOutputTokens     int
 }
 
 type contextTrimStats struct {
@@ -33,6 +35,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"stepfun/step-3.7-flash:free":                        {ContextLimit: 262144, SafetyMargin: 0, MaxInputTokens: 220000},
 	"cohere/north-mini-code:free":                        {ContextLimit: 256000, SafetyMargin: 40000, MaxInputTokens: 180000},
 	"nvidia/nemotron-3.5-content-safety:free":            {ContextLimit: 128000, SafetyMargin: 40000, MaxInputTokens: 80000},
+	"nvidia/nemotron-3.5-lightning:free":                 {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000, DefaultOutputTokens: 8192, MaxOutputTokens: 65536},
 	"nvidia/nemotron-3-ultra-550b-a55b:free":             {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000},
 	"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {ContextLimit: 256000, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"poolside/laguna-xs-2.1:free":                        {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
@@ -216,7 +219,17 @@ func contextInputBudget(payload map[string]any, profile contextTrimProfile, resp
 	}
 	outputBudget, outputField := outputBudgetFromPayload(payload, responses)
 	if outputBudget <= 0 {
-		outputBudget = 8192
+		outputBudget = profile.DefaultOutputTokens
+		if outputBudget <= 0 {
+			outputBudget = 8192
+		}
+	}
+	if profile.MaxOutputTokens > 0 && outputBudget > profile.MaxOutputTokens {
+		outputBudget = profile.MaxOutputTokens
+		if outputField != "" {
+			payload[outputField] = outputBudget
+			stats.OutputClamped = true
+		}
 	}
 	if outputBudget > limit/2 {
 		outputBudget = limit / 2

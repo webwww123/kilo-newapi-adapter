@@ -469,7 +469,7 @@ func TestStepFunJSONCompatLeavesOrdinaryToolsUntouchedAndRejectsCombinedMode(t *
 	}
 }
 
-func TestKiloAutoAndNemotronUltraJSONCompatRepairWithoutForwardingFormat(t *testing.T) {
+func TestKiloAutoAndNemotronJSONCompatRepairWithoutForwardingFormat(t *testing.T) {
 	schemaFormat := `{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}}`
 	tests := []struct {
 		name          string
@@ -484,6 +484,8 @@ func TestKiloAutoAndNemotronUltraJSONCompatRepairWithoutForwardingFormat(t *test
 		{name: "auto_schema_stream", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: schemaFormat, stream: true, repairFloor: kiloAutoJSONRepairOutputFloor},
 		{name: "ultra_object_stream", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
 		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "lightning_object", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: `{"type":"json_object"}`, repairFloor: lingJSONRepairOutputFloor},
+		{name: "lightning_schema_stream", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: schemaFormat, stream: true, repairFloor: lingJSONRepairOutputFloor},
 	}
 
 	for _, tc := range tests {
@@ -557,7 +559,7 @@ func TestKiloAutoJSONCompatSalvagesValidatedReasoningWithoutSecondCall(t *testin
 	}
 }
 
-func TestKiloAutoAndNemotronUltraOrdinaryToolsRemainPassthrough(t *testing.T) {
+func TestKiloAutoAndNemotronOrdinaryToolsRemainPassthrough(t *testing.T) {
 	tests := []struct {
 		name          string
 		publicModel   string
@@ -565,6 +567,7 @@ func TestKiloAutoAndNemotronUltraOrdinaryToolsRemainPassthrough(t *testing.T) {
 	}{
 		{name: "auto", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel},
 		{name: "ultra", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel},
+		{name: "lightning", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

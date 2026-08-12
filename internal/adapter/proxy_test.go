@@ -1262,6 +1262,59 @@ func TestNvidiaSuperFreeUsesActual262KContextLimit(t *testing.T) {
 	}
 }
 
+func TestNemotronLightningUsesMillionTokenContextProfile(t *testing.T) {
+	profile, ok := freeContextTrimProfiles[nemotronLightningFreeModel]
+	if !ok {
+		t.Fatal("Nemotron Lightning context trim profile is missing")
+	}
+	want := contextTrimProfile{
+		ContextLimit:        1000000,
+		SafetyMargin:        40000,
+		MaxInputTokens:      900000,
+		DefaultOutputTokens: 8192,
+		MaxOutputTokens:     65536,
+	}
+	if profile != want {
+		t.Fatalf("Nemotron Lightning profile = %#v, want %#v", profile, want)
+	}
+
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/nvidia/nemotron-3.5-lightning:free",
+		"messages":[{"role":"user","content":"hello"}],
+		"max_tokens":100000
+	}`)
+	if rec.Code != http.StatusOK || len(*calls) != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+	}
+	if got := (*calls)[0].Body["max_tokens"]; got != float64(65536) {
+		t.Fatalf("max_tokens=%#v, want 65536", got)
+	}
+}
+
+func TestEventStreamAuditFlagsZeroCompletionSoftErrorWithoutCapturingContent(t *testing.T) {
+	rec := httptest.NewRecorder()
+	stream := strings.NewReader("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":0}}\n\ndata: [DONE]\n\n")
+	audit := copyEventStreamWithNormalizeAndCapture(rec, stream, nil, nemotronLightningJSONPublicModel, "/chat/completions")
+	if !audit.Done || audit.Events != 1 || audit.CompletionTokens != 0 || !audit.SuspectedSoftError() {
+		t.Fatalf("unexpected audit: %#v", audit)
+	}
+	if !strings.Contains(rec.Body.String(), "[DONE]") {
+		t.Fatalf("stream was not forwarded: %s", rec.Body.String())
+	}
+}
+
+func TestEventStreamAuditAcceptsVisibleZeroUsageStream(t *testing.T) {
+	rec := httptest.NewRecorder()
+	stream := strings.NewReader("data: {\"choices\":[{\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n")
+	audit := copyEventStreamWithNormalizeAndCapture(rec, stream, nil, nemotronLightningJSONPublicModel, "/chat/completions")
+	if audit.VisibleDeltas != 1 || audit.SuspectedSoftError() {
+		t.Fatalf("unexpected audit: %#v", audit)
+	}
+}
+
 func TestLingFreeModelsUseActual262KContextLimit(t *testing.T) {
 	if _, exists := freeContextTrimProfiles["inclusionai/ling-3.0-flash"]; exists {
 		t.Fatal("paid Ling Flash must not use the free Ling trim profile")

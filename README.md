@@ -78,6 +78,7 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 `kilo-auto/free` uses its advertised 256000 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-tiny:free` uses its advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
+`nvidia/nemotron-3.5-lightning:free` uses its advertised 1000000 context, 65536 maximum completion tokens, a 40000-token safety margin, and a 900000-token maximum input budget.
 
 The profiled Ling Flash-free and Ling Tiny-free requests are normalized locally before they reach Kilo. Image, audio, video, and
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
@@ -86,8 +87,10 @@ the upstream cleanup step and emulated in-process for Ling and StepFun 3.7: the 
 object, locally salvages a validated object from hidden reasoning when visible content is empty, repairs with the
 same model at most once when salvage is unavailable, and buffers client streaming until validation succeeds.
 Hidden reasoning fields are removed from every validated non-stream response and are never emitted in SSE.
+Nemotron 3.5 Lightning uses the same model-scoped local object/strict-Schema validation and single bounded repair path because its advertised parameter list does not include `response_format` and live probes do not enforce it natively.
+Ordinary Lightning SSE also emits a body-free `kilo_stream_audit` line with event/parse/error counts, visible/tool delta counts, completion tokens, DONE state, and a `suspected_soft_error` flag for correlating HTTP 200 plus zero-completion rows without logging content.
 Requests combining tools with `response_format` are rejected locally for these profiles; ordinary tools and
-requests without `response_format` stay on the existing path. Explicit `max_tokens`, `max_completion_tokens`,
+requests without `response_format` stay on the existing path. For the profiled Ling models, explicit `max_tokens`, `max_completion_tokens`,
 and `max_output_tokens` values up to 32768 are preserved; for Ling Tiny, positive values below 256 are
 raised to 256 so its reasoning phase cannot consume the full allowance before visible output. Larger values are removed so Kilo can
 apply its model/provider default instead of returning a generic upstream 400. If an oversized

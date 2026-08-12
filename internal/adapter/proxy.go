@@ -369,8 +369,13 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	responseStatus := resp.StatusCode
 	if isEventStreamResponse(resp.Header) {
 		w.WriteHeader(responseStatus)
-		if copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath) {
+		audit := copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath)
+		if audit.HadError {
 			responseStatus = http.StatusInternalServerError
+		}
+		if publicRequestModel == nemotronLightningJSONPublicModel {
+			fmt.Printf("kilo_stream_audit model=nemotron_lightning http_status=%d events=%d parse_errors=%d error_events=%d visible_deltas=%d tool_deltas=%d completion_tokens=%d done=%t suspected_soft_error=%t\n",
+				resp.StatusCode, audit.Events, audit.ParseErrors, audit.ErrorEvents, audit.VisibleDeltas, audit.ToolDeltas, audit.CompletionTokens, audit.Done, audit.SuspectedSoftError())
 		}
 	} else {
 		responseBody, readErr := io.ReadAll(resp.Body)
@@ -811,13 +816,29 @@ func isEventStreamResponse(header http.Header) bool {
 	return strings.Contains(strings.ToLower(header.Get("Content-Type")), "text/event-stream")
 }
 
-func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) bool {
+type eventStreamAudit struct {
+	HadError         bool
+	Events           int
+	ParseErrors      int
+	ErrorEvents      int
+	VisibleDeltas    int
+	ToolDeltas       int
+	CompletionTokens int64
+	Done             bool
+}
+
+func (a eventStreamAudit) SuspectedSoftError() bool {
+	return a.HadError || a.ErrorEvents > 0 || (a.VisibleDeltas == 0 && a.ToolDeltas == 0 && a.CompletionTokens == 0)
+}
+
+func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) eventStreamAudit {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(r)
-	hadError := false
+	audit := eventStreamAudit{}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			audit.observe(line)
 			chunk, chunkHadError := normalizeEventStreamLine(line, publicModel, upstreamPath)
 			if capture != nil {
 				if chunkHadError {
@@ -826,15 +847,94 @@ func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, 
 					_, _ = capture.Write(chunk)
 				}
 			}
-			hadError = hadError || chunkHadError
+			audit.HadError = audit.HadError || chunkHadError
 			_, _ = w.Write(chunk)
 			if flusher != nil {
 				flusher.Flush()
 			}
 		}
 		if err != nil {
-			return hadError
+			return audit
 		}
+	}
+}
+
+func (a *eventStreamAudit) observe(line []byte) {
+	trimmed := bytes.TrimSpace(line)
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return
+	}
+	data := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+	if len(data) == 0 {
+		return
+	}
+	if bytes.Equal(data, []byte("[DONE]")) {
+		a.Done = true
+		return
+	}
+	a.Events++
+	var payload map[string]any
+	if err := json.Unmarshal(data, &payload); err != nil {
+		a.ParseErrors++
+		return
+	}
+	if successPayloadHasError(payload) {
+		a.ErrorEvents++
+	}
+	if usage, ok := payload["usage"].(map[string]any); ok {
+		for _, key := range []string{"completion_tokens", "output_tokens"} {
+			if value, ok := streamAuditInt64(usage[key]); ok {
+				a.CompletionTokens = value
+				break
+			}
+		}
+	}
+	choices, _ := payload["choices"].([]any)
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		if streamAuditHasVisibleText(delta["content"]) {
+			a.VisibleDeltas++
+		}
+		if calls, ok := delta["tool_calls"].([]any); ok && len(calls) > 0 {
+			a.ToolDeltas++
+		}
+	}
+}
+
+func streamAuditHasVisibleText(value any) bool {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		for _, raw := range typed {
+			if streamAuditHasVisibleText(raw) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"text", "content"} {
+			if streamAuditHasVisibleText(typed[key]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func streamAuditInt64(value any) (int64, bool) {
+	switch typed := value.(type) {
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		parsed, err := typed.Int64()
+		return parsed, err == nil
+	case int:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	default:
+		return 0, false
 	}
 }
 
