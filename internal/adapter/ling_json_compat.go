@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
 )
@@ -38,6 +39,7 @@ const (
 	lingJSONObjectFormat             = "json_object"
 	lingJSONSchemaFormat             = "json_schema"
 	lingJSONValidationErrorClass     = "validation_failed"
+	lingJSONFallbackMaxBytes         = 16 << 10
 )
 
 type lingJSONCompatHandler struct {
@@ -46,6 +48,12 @@ type lingJSONCompatHandler struct {
 }
 
 type lingJSONPreloadedBodyKey struct{}
+type lingJSONStructuredRequestKey struct{}
+
+type lingJSONStructuredRetryState struct {
+	retries   int
+	totalWait time.Duration
+}
 
 type lingJSONSpec struct {
 	Kind           string
@@ -69,6 +77,7 @@ type lingJSONStats struct {
 	ErrorClass         string
 	RepairUsed         bool
 	ReasoningSalvaged  bool
+	ObjectFallbackUsed bool
 	UpstreamErrorRetry bool
 	PublicStatus       int
 	Started            time.Time
@@ -128,8 +137,11 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
 		return
 	}
+	r = withLingJSONStructuredRequest(r)
 
 	var repairCandidate string
+	var lastEnvelope map[string]any
+	var lastRecorder *lingJSONBufferedWriter
 	for attempt := 1; attempt <= lingJSONMaxAttempts; attempt++ {
 		stats.Attempts = attempt
 		var attemptBody []byte
@@ -163,6 +175,8 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		}
 
 		envelope, canonical, validateErr := validateLingJSONResponse(recorder.body.Bytes(), spec)
+		lastEnvelope = envelope
+		lastRecorder = recorder
 		if validateErr != nil {
 			stats.ValidationFailure++
 			if attempt == 1 && (spec.Profile == "stepfun" || spec.Profile == "kilo_auto") {
@@ -197,10 +211,80 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		copyLingJSONBufferedResponse(w, recorder, rewritten)
 		return
 	}
+	if supportsLingJSONObjectFallback(spec) && lastEnvelope != nil && lastRecorder != nil {
+		canonical, fallbackErr := buildLingJSONObjectFallback(repairCandidate)
+		if fallbackErr == nil {
+			stats.Validated = true
+			stats.ObjectFallbackUsed = true
+			stats.ErrorClass = ""
+			stats.PublicStatus = http.StatusOK
+			if spec.PublicModel != "" {
+				lastEnvelope["model"] = spec.PublicModel
+			}
+			ensureLingJSONUsage(lastEnvelope, canonical)
+			if spec.OriginalStream {
+				writeLingJSONSSE(w, lastEnvelope, canonical, spec.PublicModel)
+				return
+			}
+			rewritten, rewriteErr := rewriteLingJSONContent(lastEnvelope, canonical)
+			if rewriteErr == nil {
+				copyLingJSONBufferedResponse(w, lastRecorder, rewritten)
+				return
+			}
+			stats.ErrorClass = "response_rewrite_failed"
+		}
+	}
 
 	stats.ErrorClass = lingJSONValidationErrorClass
 	stats.PublicStatus = http.StatusInternalServerError
 	writePublicErrorResponse(w, http.StatusInternalServerError, lingJSONRequestPath)
+}
+
+func supportsLingJSONObjectFallback(spec lingJSONSpec) bool {
+	return spec.Kind == lingJSONObjectFormat && (spec.PublicModel == lingTinyJSONPublicModel || spec.Profile == "kilo_auto")
+}
+
+func buildLingJSONObjectFallback(candidate string) ([]byte, error) {
+	candidate = strings.TrimSpace(candidate)
+	if candidate == "" {
+		candidate = "No valid JSON object was returned."
+	}
+	if len(candidate) > lingJSONFallbackMaxBytes {
+		candidate = candidate[:lingJSONFallbackMaxBytes]
+		for !utf8.ValidString(candidate) {
+			candidate = candidate[:len(candidate)-1]
+		}
+	}
+	return json.Marshal(map[string]any{"result": candidate})
+}
+
+func ensureLingJSONUsage(envelope map[string]any, canonical []byte) {
+	if envelope == nil {
+		return
+	}
+	completionTokens := max(1, (len([]rune(string(canonical)))+3)/4)
+	usage, _ := envelope["usage"].(map[string]any)
+	if usage == nil {
+		usage = map[string]any{}
+		envelope["usage"] = usage
+	}
+	if current, ok := lingJSONInteger(usage["completion_tokens"]); !ok || current <= 0 {
+		usage["completion_tokens"] = completionTokens
+	}
+	if _, exists := usage["output_tokens"]; exists {
+		if current, ok := lingJSONInteger(usage["output_tokens"]); !ok || current <= 0 {
+			usage["output_tokens"] = completionTokens
+		}
+	}
+	promptTokens, _ := lingJSONInteger(usage["prompt_tokens"])
+	completion, _ := lingJSONInteger(usage["completion_tokens"])
+	if current, ok := lingJSONInteger(usage["total_tokens"]); !ok || current <= 0 {
+		total := promptTokens + completion
+		if total <= 0 {
+			total = int64(completionTokens)
+		}
+		usage["total_tokens"] = total
+	}
 }
 
 func newLingJSONBufferedWriter() *lingJSONBufferedWriter {
@@ -255,6 +339,24 @@ func restoreLingJSONBody(r *http.Request, data []byte) {
 
 func withLingJSONPreloadedBody(r *http.Request, body []byte) *http.Request {
 	return r.WithContext(context.WithValue(r.Context(), lingJSONPreloadedBodyKey{}, body))
+}
+
+func withLingJSONStructuredRequest(r *http.Request) *http.Request {
+	if r == nil {
+		return r
+	}
+	if _, ok := r.Context().Value(lingJSONStructuredRequestKey{}).(*lingJSONStructuredRetryState); ok {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), lingJSONStructuredRequestKey{}, &lingJSONStructuredRetryState{}))
+}
+
+func lingJSONStructuredRetryStateFromRequest(r *http.Request) *lingJSONStructuredRetryState {
+	if r == nil {
+		return nil
+	}
+	state, _ := r.Context().Value(lingJSONStructuredRequestKey{}).(*lingJSONStructuredRetryState)
+	return state
 }
 
 func lingJSONPreloadedBody(r *http.Request) ([]byte, bool) {
@@ -820,6 +922,7 @@ func copyLingJSONHeaders(dst, src http.Header) {
 }
 
 func writeLingJSONSSE(w http.ResponseWriter, envelope map[string]any, canonical []byte, fallbackModel string) {
+	ensureLingJSONUsage(envelope, canonical)
 	id := strings.TrimSpace(fmt.Sprint(envelope["id"]))
 	if id == "" || id == "<nil>" {
 		id = "chatcmpl-kilo-json-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -859,6 +962,9 @@ func writeLingJSONSSE(w http.ResponseWriter, envelope map[string]any, canonical 
 			"finish_reason": "stop",
 		}},
 	}
+	if usage, ok := envelope["usage"]; ok && usage != nil {
+		final["usage"] = usage
+	}
 	firstBody, _ := json.Marshal(first)
 	finalBody, _ := json.Marshal(final)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -878,13 +984,14 @@ func logLingJSONCompat(stats *lingJSONStats) {
 	if stats == nil {
 		return
 	}
-	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t reasoning_salvaged=%t repair_used=%t upstream_error_retried=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
+	fmt.Printf("kilo_json_compat profile=%s type=%s attempts=%d validation_failures=%d validated=%t reasoning_salvaged=%t object_fallback_used=%t repair_used=%t upstream_error_retried=%t buffered_stream=%t schema_bytes=%d error_class=%s public_status=%d duration_ms=%d\n",
 		stats.Profile,
 		stats.RequestedType,
 		stats.Attempts,
 		stats.ValidationFailure,
 		stats.Validated,
 		stats.ReasoningSalvaged,
+		stats.ObjectFallbackUsed,
 		stats.RepairUsed,
 		stats.UpstreamErrorRetry,
 		stats.BufferedStream,

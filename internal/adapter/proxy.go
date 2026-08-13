@@ -24,10 +24,12 @@ const (
 	publicReviewErrorMessage    = "触发审查，请重试"
 	publicServerErrorMessage    = "500 请求无法处理，请检查请求参数或稍后重试。"
 	lingTiny429RetryBudget      = 30 * time.Second
+	structuredJSONRetryBudget   = 5 * time.Second
 	kiloAutoRetryBudget         = 15 * time.Second
 )
 
 var lingTiny429RetryBackoff = [...]time.Duration{3 * time.Second, 7 * time.Second, 20 * time.Second}
+var structuredJSONRetryBackoff = [...]time.Duration{time.Second}
 var kiloAutoRetryBackoff = [...]time.Duration{time.Second, 3 * time.Second}
 
 type Handler struct {
@@ -986,6 +988,9 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 }
 
 func (h *Handler) forwardWithModelRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
+	if isStructuredJSONRetryRequest(original) && (publicModel == prefixPublicModel(lingTinyFreeModel) || publicModel == kiloAutoJSONPublicModel) {
+		return h.forwardWithStructuredJSONRetry(original, upstreamPath, body, publicModel)
+	}
 	if publicModel == prefixPublicModel(lingTinyFreeModel) {
 		return h.forwardWithLingTiny429Retry(original, upstreamPath, body, publicModel)
 	}
@@ -993,6 +998,86 @@ func (h *Handler) forwardWithModelRetry(original *http.Request, upstreamPath str
 		return h.forwardWithKiloAutoRetry(original, upstreamPath, body, publicModel)
 	}
 	return h.forward(original, upstreamPath, bytes.NewReader(body))
+}
+
+func isStructuredJSONRetryRequest(r *http.Request) bool {
+	return lingJSONStructuredRetryStateFromRequest(r) != nil
+}
+
+func (h *Handler) forwardWithStructuredJSONRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
+	state := lingJSONStructuredRetryStateFromRequest(original)
+	if state == nil {
+		return h.forward(original, upstreamPath, bytes.NewReader(body))
+	}
+	for {
+		resp, err := h.forward(original, upstreamPath, bytes.NewReader(body))
+		retryable := err != nil
+		statusLabel := "transport"
+		if resp != nil {
+			statusLabel = strconv.Itoa(resp.StatusCode)
+			retryable = isStructuredJSONRetryableStatus(resp.StatusCode)
+		}
+		if !retryable || state.retries >= len(structuredJSONRetryBackoff) {
+			return resp, err
+		}
+		delay, ok := structuredJSONRetryDelay(state.retries, retryAfterFromResponse(resp), state.totalWait, h.retryJitter)
+		if !ok {
+			return resp, err
+		}
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		fmt.Printf("kilo_upstream_retry scope=structured_json path=%s model=%s retry=%d max_retries=%d status=%s wait_ms=%d retry_after_present=%t\n",
+			upstreamPath,
+			publicModel,
+			state.retries+1,
+			len(structuredJSONRetryBackoff),
+			statusLabel,
+			delay.Milliseconds(),
+			strings.TrimSpace(retryAfterFromResponse(resp)) != "",
+		)
+		if waitErr := h.waitBeforeRetry(original.Context(), delay); waitErr != nil {
+			return nil, waitErr
+		}
+		state.retries++
+		state.totalWait += delay
+	}
+}
+
+func retryAfterFromResponse(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	return resp.Header.Get("Retry-After")
+}
+
+func isStructuredJSONRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func structuredJSONRetryDelay(retryIndex int, retryAfter string, totalWait time.Duration, jitter func(time.Duration) time.Duration) (time.Duration, bool) {
+	if retryIndex < 0 || retryIndex >= len(structuredJSONRetryBackoff) || totalWait >= structuredJSONRetryBudget {
+		return 0, false
+	}
+	delay := structuredJSONRetryBackoff[retryIndex]
+	if jitter != nil {
+		if extra := jitter(delay); extra > 0 {
+			delay += extra
+		}
+	}
+	if requested, ok := parseRetryAfterWithBudget(retryAfter, time.Now(), structuredJSONRetryBudget); ok && requested > delay {
+		delay = requested
+	}
+	remaining := structuredJSONRetryBudget - totalWait
+	if delay > remaining {
+		delay = remaining
+	}
+	return delay, true
 }
 
 func (h *Handler) forwardWithLingTiny429Retry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {

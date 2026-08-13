@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 func newLingJSONCompatTestHandler(t *testing.T, responder func(int, map[string]any) string) (http.Handler, *[]map[string]any, func()) {
@@ -657,6 +660,189 @@ func TestLingJSONCompatValidationFailureIsGeneric(t *testing.T) {
 	}
 	if len(*calls) != 2 {
 		t.Fatalf("upstream calls=%d, want 2", len(*calls))
+	}
+}
+
+func TestLingFlashJSONObjectValidationFailureRemainsGeneric(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, _ map[string]any) string {
+		return lingJSONTestCompletion(t, "not json and internal-provider-name")
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+lingJSONPublicModel+`","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), publicServerErrorMessage) || strings.Contains(rec.Body.String(), `"result"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("upstream calls=%d, want 2", len(*calls))
+	}
+}
+
+func TestLingTinyAndKiloAutoJSONObjectFallbackAfterSecondInvalidAnswer(t *testing.T) {
+	tests := []struct {
+		name   string
+		model  string
+		stream bool
+	}{
+		{name: "ling_tiny_non_stream", model: lingTinyJSONPublicModel},
+		{name: "ling_tiny_stream", model: lingTinyJSONPublicModel, stream: true},
+		{name: "kilo_auto_non_stream", model: kiloAutoJSONPublicModel},
+		{name: "kilo_auto_stream", model: kiloAutoJSONPublicModel, stream: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+				model, _ := payload["model"].(string)
+				if call == 1 {
+					return jsonCompatTestCompletion(t, model, "first answer is not JSON")
+				}
+				return jsonCompatTestCompletion(t, model, "second answer is still not JSON")
+			})
+			defer closeUpstream()
+
+			payload := `{"model":"` + tc.model + `","stream":` + strconv.FormatBool(tc.stream) + `,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return an object"}]}`
+			rec := postJSON(t, handler, "/v1/chat/completions", payload)
+			if rec.Code != http.StatusOK || len(*calls) != 2 {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+			}
+			content := ""
+			if tc.stream {
+				content = concatenateLingJSONTestStream(t, rec.Body.String())
+				if !strings.Contains(rec.Body.String(), "data: [DONE]") {
+					t.Fatalf("stream missing DONE: %s", rec.Body.String())
+				}
+			} else {
+				content = lingJSONTestResponseContent(t, rec.Body.Bytes())
+			}
+			var object map[string]any
+			if err := json.Unmarshal([]byte(content), &object); err != nil {
+				t.Fatalf("fallback is not a JSON object: %v content=%q", err, content)
+			}
+			if object["result"] != "second answer is still not JSON" {
+				t.Fatalf("fallback result=%#v content=%s", object["result"], content)
+			}
+			if !strings.Contains(rec.Body.String(), `"completion_tokens":`) {
+				t.Fatalf("fallback usage missing: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestLingJSONObjectFallbackIsBoundedAndValidUTF8(t *testing.T) {
+	candidate := strings.Repeat("界", lingJSONFallbackMaxBytes)
+	canonical, err := buildLingJSONObjectFallback(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(canonical, &object); err != nil {
+		t.Fatalf("fallback JSON invalid: %v", err)
+	}
+	result, _ := object["result"].(string)
+	if len(result) > lingJSONFallbackMaxBytes || !utf8.ValidString(result) {
+		t.Fatalf("fallback bytes=%d valid_utf8=%t", len(result), utf8.ValidString(result))
+	}
+}
+
+func TestLingTinyAndKiloAutoStrictSchemaNeverFallsBack(t *testing.T) {
+	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel} {
+		t.Run(model, func(t *testing.T) {
+			handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+				upstreamModel, _ := payload["model"].(string)
+				return jsonCompatTestCompletion(t, upstreamModel, `{"status":"wrong"}`)
+			})
+			defer closeUpstream()
+
+			rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+model+`","response_format":{"type":"json_schema","json_schema":{"name":"strict","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"}},"required":["status"]}}},"messages":[{"role":"user","content":"return wrong"}]}`)
+			if rec.Code != http.StatusInternalServerError || len(*calls) != 2 || strings.Contains(rec.Body.String(), `"result"`) {
+				t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestStructuredJSONTransientFailureRetriesOnlyOnce(t *testing.T) {
+	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel} {
+		t.Run(model, func(t *testing.T) {
+			calls := 0
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"message":"PRIVATE_TRANSIENT"}}`)
+			}))
+			defer upstream.Close()
+
+			base := newBaseHandler(Config{UpstreamBaseURL: upstream.URL, HTTPClient: upstream.Client(), RequestLogDir: t.TempDir(), KiloAutoReliabilityEnabled: true})
+			waits := 0
+			base.retryWait = func(context.Context, time.Duration) error {
+				waits++
+				return nil
+			}
+			base.retryJitter = func(time.Duration) time.Duration { return 0 }
+			handler := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+
+			rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+model+`","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+			if rec.Code != http.StatusInternalServerError || calls != 2 || waits != 1 {
+				t.Fatalf("status=%d calls=%d waits=%d body=%s", rec.Code, calls, waits, rec.Body.String())
+			}
+			if strings.Contains(rec.Body.String(), "PRIVATE_TRANSIENT") {
+				t.Fatalf("transient detail leaked: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestStructuredJSONRetryBudgetIsSharedWithRepairAttempt(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		switch calls {
+		case 1:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"first transient"}}`)
+		case 2:
+			_, _ = io.WriteString(w, jsonCompatTestCompletion(t, lingTinyFreeModel, "not json"))
+		default:
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"repair transient"}}`)
+		}
+	}))
+	defer upstream.Close()
+
+	base := newBaseHandler(Config{UpstreamBaseURL: upstream.URL, HTTPClient: upstream.Client(), RequestLogDir: t.TempDir()})
+	waits := 0
+	base.retryWait = func(context.Context, time.Duration) error {
+		waits++
+		return nil
+	}
+	base.retryJitter = func(time.Duration) time.Duration { return 0 }
+	handler := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+lingTinyJSONPublicModel+`","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != http.StatusInternalServerError || calls != 3 || waits != 1 {
+		t.Fatalf("status=%d calls=%d waits=%d body=%s", rec.Code, calls, waits, rec.Body.String())
+	}
+}
+
+func TestStructuredJSONReviewFailureIsNotRetried(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusUnavailableForLegalReasons)
+	}))
+	defer upstream.Close()
+	base := newBaseHandler(Config{UpstreamBaseURL: upstream.URL, HTTPClient: upstream.Client(), RequestLogDir: t.TempDir()})
+	base.retryWait = func(context.Context, time.Duration) error {
+		t.Fatal("review failure must not wait for retry")
+		return nil
+	}
+	handler := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+lingTinyJSONPublicModel+`","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != publicReviewStatus || calls != 1 {
+		t.Fatalf("status=%d calls=%d body=%s", rec.Code, calls, rec.Body.String())
 	}
 }
 
