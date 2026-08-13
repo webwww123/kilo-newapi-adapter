@@ -26,6 +26,12 @@ const (
 	nemotronUltraJSONPublicModel     = publicModelPrefix + nemotronUltraFreeModel
 	nemotronLightningFreeModel       = "nvidia/nemotron-3.5-lightning:free"
 	nemotronLightningJSONPublicModel = publicModelPrefix + nemotronLightningFreeModel
+	tencentHY3FreeModel              = "tencent/hy3:free"
+	tencentHY3JSONPublicModel        = publicModelPrefix + tencentHY3FreeModel
+	openRouterFreeModel              = "openrouter/free"
+	openRouterJSONPublicModel        = publicModelPrefix + openRouterFreeModel
+	northMiniCodeFreeModel           = "cohere/north-mini-code:free"
+	northMiniCodeJSONPublicModel     = publicModelPrefix + northMiniCodeFreeModel
 	lingJSONMaxSchemaBytes           = 64 << 10
 	lingJSONMaxRepairBytes           = 64 << 10
 	lingJSONFirstOutputFloor         = 256
@@ -451,6 +457,12 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "nemotron_ultra", nemotronUltraJSONPublicModel, true
 	case nemotronLightningJSONPublicModel, nemotronLightningFreeModel:
 		return "nemotron_lightning", nemotronLightningJSONPublicModel, true
+	case tencentHY3JSONPublicModel, tencentHY3FreeModel:
+		return "tencent_hy3", tencentHY3JSONPublicModel, true
+	case openRouterJSONPublicModel, openRouterFreeModel:
+		return "openrouter_free", openRouterJSONPublicModel, true
+	case northMiniCodeJSONPublicModel, northMiniCodeFreeModel:
+		return "north_mini_code", northMiniCodeJSONPublicModel, true
 	default:
 		return "", "", false
 	}

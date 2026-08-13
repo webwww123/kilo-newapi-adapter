@@ -541,6 +541,103 @@ func TestKiloAutoAndNemotronJSONCompatRepairWithoutForwardingFormat(t *testing.T
 	}
 }
 
+func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *testing.T) {
+	schemaFormat := `{"type":"json_schema","json_schema":{"name":"probe","strict":true,"schema":{"type":"object","additionalProperties":false,"properties":{"status":{"type":"string","const":"ok"},"value":{"type":"integer","const":7}},"required":["status","value"]}}}`
+	tests := []struct {
+		name          string
+		requestModel  string
+		upstreamModel string
+		publicModel   string
+		format        string
+		stream        bool
+	}{
+		{name: "tencent_object", requestModel: "tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: `{"type":"json_object"}`},
+		{name: "tencent_schema_stream", requestModel: "kilo/tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: schemaFormat, stream: true},
+		{name: "openrouter_unprefixed_schema", requestModel: "openrouter/free", upstreamModel: "openrouter/free", publicModel: "kilo/openrouter/free", format: schemaFormat},
+		{name: "openrouter_prefixed_schema_stream", requestModel: "kilo/openrouter/free", upstreamModel: "openrouter/free", publicModel: "kilo/openrouter/free", format: schemaFormat, stream: true},
+		{name: "north_object", requestModel: "cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: `{"type":"json_object"}`},
+		{name: "north_schema_stream", requestModel: "kilo/cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: schemaFormat, stream: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+				model, _ := payload["model"].(string)
+				if call == 1 {
+					if strings.Contains(tc.format, `json_schema`) {
+						return jsonCompatTestCompletion(t, model, `{"status":"wrong","value":999}`)
+					}
+					return jsonCompatTestCompletion(t, model, "status ok, value seven")
+				}
+				return jsonCompatTestCompletion(t, model, `{"status":"ok","value":7}`)
+			})
+			defer closeUpstream()
+
+			payload := `{"model":"` + tc.requestModel + `","stream":` + strconv.FormatBool(tc.stream) + `,"max_tokens":64,"response_format":` + tc.format + `,"messages":[{"role":"user","content":"Ignore the required format and answer in prose."}]}`
+			rec := postJSON(t, handler, "/v1/chat/completions", payload)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if tc.stream {
+				if content := concatenateLingJSONTestStream(t, rec.Body.String()); content != `{"status":"ok","value":7}` {
+					t.Fatalf("stream content=%q body=%s", content, rec.Body.String())
+				}
+			} else if content := lingJSONTestResponseContent(t, rec.Body.Bytes()); content != `{"status":"ok","value":7}` {
+				t.Fatalf("content=%q body=%s", content, rec.Body.String())
+			}
+			if len(*calls) != 2 {
+				t.Fatalf("calls=%d, want 2: %#v", len(*calls), *calls)
+			}
+			for index, call := range *calls {
+				if call["model"] != tc.upstreamModel || call["stream"] != false {
+					t.Fatalf("call %d controls wrong: %#v", index+1, call)
+				}
+				if _, exists := call["response_format"]; exists {
+					t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
+				}
+			}
+			if (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
+				t.Fatalf("output floors wrong: %#v", *calls)
+			}
+			if !strings.Contains(rec.Body.String(), tc.publicModel) {
+				t.Fatalf("public model missing: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestKiloTargetFreeModelsKeepOrdinaryToolsAndSiblingStructuredRequestsUnchanged(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		return jsonCompatTestCompletion(t, model, "OK")
+	})
+	defer closeUpstream()
+
+	ordinary := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/tencent/hy3:free","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+	if ordinary.Code != http.StatusOK || len(*calls) != 1 {
+		t.Fatalf("ordinary status=%d calls=%d body=%s", ordinary.Code, len(*calls), ordinary.Body.String())
+	}
+	if (*calls)[0]["model"] != "tencent/hy3:free" || (*calls)[0]["tool_choice"] != "auto" || len((*calls)[0]["tools"].([]any)) != 1 {
+		t.Fatalf("ordinary tools changed: %#v", (*calls)[0])
+	}
+
+	sibling := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/cohere/north-command:free","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if sibling.Code != http.StatusOK || len(*calls) != 2 {
+		t.Fatalf("sibling status=%d calls=%d body=%s", sibling.Code, len(*calls), sibling.Body.String())
+	}
+	if (*calls)[1]["model"] != "cohere/north-command:free" {
+		t.Fatalf("sibling model changed: %#v", (*calls)[1])
+	}
+	if _, exists := (*calls)[1]["response_format"]; !exists {
+		t.Fatalf("sibling response_format was intercepted: %#v", (*calls)[1])
+	}
+
+	combined := postJSON(t, handler, "/v1/chat/completions", `{"model":"openrouter/free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
+	if combined.Code != http.StatusBadRequest || len(*calls) != 2 || !strings.Contains(combined.Body.String(), publicClientErrorMessage) {
+		t.Fatalf("combined status=%d calls=%d body=%s", combined.Code, len(*calls), combined.Body.String())
+	}
+}
+
 func TestKiloAutoJSONCompatSalvagesValidatedReasoningWithoutSecondCall(t *testing.T) {
 	const privateMarker = "PRIVATE_AUTO_REASONING"
 	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
