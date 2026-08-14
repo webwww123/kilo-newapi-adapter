@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 Environment=ADDR=172.17.0.1:18351
 Environment=KILO_AUTO_RELIABILITY_ENABLED=true
+Environment=TRUSTED_NEWAPI_ERROR_DIAGNOSTICS=true
 Environment=REQUEST_LOG_ENABLED=true
 Environment=REQUEST_LOG_DIR=/var/log/kilo-auto-reliability-canary
 Environment=REQUEST_LOG_RETENTION=24h

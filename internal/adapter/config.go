@@ -24,6 +24,7 @@ type Config struct {
 	RequestLogBodyLimit int64
 
 	KiloAutoReliabilityEnabled bool
+	TrustedNewAPIErrors        bool
 }
 
 func ConfigFromEnv() Config {
@@ -40,6 +41,10 @@ func ConfigFromEnv() Config {
 		RequestLogBodyLimit: parseInt64(os.Getenv("REQUEST_LOG_BODY_LIMIT"), 1<<20),
 		KiloAutoReliabilityEnabled: parseBool(
 			os.Getenv("KILO_AUTO_RELIABILITY_ENABLED"),
+			false,
+		),
+		TrustedNewAPIErrors: parseBool(
+			os.Getenv("TRUSTED_NEWAPI_ERROR_DIAGNOSTICS"),
 			false,
 		),
 		HTTPClient: &http.Client{

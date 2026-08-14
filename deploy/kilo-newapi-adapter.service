@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/kilo-newapi-adapter.env
+Environment=TRUSTED_NEWAPI_ERROR_DIAGNOSTICS=true
 ExecStart=/usr/local/bin/kilo-newapi-adapter
 Restart=always
 RestartSec=3
@@ -17,4 +18,3 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
-

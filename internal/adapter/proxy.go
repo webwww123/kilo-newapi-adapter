@@ -192,7 +192,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start tim
 
 	rawCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 	_, _ = rawCapture.Write(body)
-	writePublicErrorResponse(w, resp.StatusCode, "/models")
+	writeUpstreamErrorResponse(w, resp.StatusCode, "/models", body, h.cfg.TrustedNewAPIErrors)
 	h.recordRequest(start, r, "/models", nil, responseLogCapture{
 		status:        resp.StatusCode,
 		bytesWritten:  rawCapture.Total(),
@@ -355,7 +355,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		}
 		rawCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 		_, _ = rawCapture.Write(responseBody)
-		writePublicErrorResponse(w, resp.StatusCode, upstreamPath)
+		writeUpstreamErrorResponse(w, resp.StatusCode, upstreamPath, responseBody, h.cfg.TrustedNewAPIErrors)
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
 			status:        resp.StatusCode,
 			bytesWritten:  rawCapture.Total(),
@@ -767,6 +767,23 @@ func writePublicErrorResponse(w http.ResponseWriter, status int, upstreamPath st
 	publicStatus := normalizePublicErrorStatus(status)
 	body := publicErrorBody(upstreamPath, publicStatus)
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Del("Content-Length")
+	w.Header().Del("Content-Encoding")
+	w.Header().Del("ETag")
+	w.Header().Del("Content-MD5")
+	w.WriteHeader(publicStatus)
+	_, _ = w.Write(body)
+}
+
+func writeUpstreamErrorResponse(w http.ResponseWriter, status int, upstreamPath string, upstreamBody []byte, trusted bool) {
+	if !trusted {
+		writePublicErrorResponse(w, status, upstreamPath)
+		return
+	}
+	publicStatus := normalizePublicErrorStatus(status)
+	body := trustedUpstreamErrorBody(upstreamPath, upstreamBody)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Del("Content-Length")
 	w.Header().Del("Content-Encoding")
