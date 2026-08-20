@@ -44,6 +44,8 @@ If your NewAPI build appends `/v1`, use the same base URL. The adapter accepts b
 Use model IDs returned by `/v1/models`, for example `kilo/nvidia/nemotron-3-super-120b-a12b:free`.
 For compatibility, unprefixed model IDs are still accepted and forwarded unchanged.
 
+`kilo/dots-studio/dots-3-note-preview:free` is a native image-input model. NewAPI channels that should retain that capability must point directly at this adapter instead of an image-to-text gateway, otherwise the original image is replaced before Dots receives it.
+
 ## Environment
 
 ```text
@@ -79,6 +81,12 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-tiny:free` uses its advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
 `nvidia/nemotron-3.5-lightning:free` uses its advertised 1000000 context, 65536 maximum completion tokens, a 40000-token safety margin, and a 900000-token maximum input budget.
+`tencent/hy3:free` uses its advertised 262144 context and 128000 maximum completion tokens, with a 40000-token safety margin and a 200000-token maximum input budget.
+`dots-studio/dots-3-note-preview:free` uses its advertised 512000 context with a 40000-token safety margin, a 400000-token maximum input budget, and a 256000-token safe output cap.
+
+HY3 Messages requests with a positive `max_tokens` below 256 are raised to 256 because smaller live requests can finish with thinking only. Dots Responses requests with a positive `max_output_tokens` below 512 are raised to 512 because the upstream can otherwise fail or finish without a message. Ordinary Chat requests and sibling models keep their client-selected limits.
+
+For HY3 Chat Completions, an OpenAI selected-function `tool_choice` is normalized to the single selected tool plus `tool_choice: "required"`. This preserves the requested function while avoiding Kilo's unreliable selected-function object handling. `auto`, `none`, `required`, malformed selections, and all sibling models are passed through unchanged.
 
 The profiled Ling Flash-free and Ling Tiny-free requests are normalized locally before they reach Kilo. Image, audio, video, and
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort

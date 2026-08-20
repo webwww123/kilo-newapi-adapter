@@ -285,6 +285,20 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			upstreamPath, lingStats.ReasoningDropped, lingStats.StructuredOutputDropped, lingStats.OversizedOutputDropped)
 	}
 
+	body, targetStats, err := normalizeTargetFreeModelRequest(body, upstreamPath)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
+			status:       http.StatusBadRequest,
+			adapterError: err.Error(),
+		})
+		return
+	}
+	if targetStats.Changed {
+		fmt.Printf("kilo_target_compat path=%s model=%s low_output_raised=%t forced_tool_choice_normalized=%t\n",
+			upstreamPath, targetStats.Model, targetStats.LowOutputRaised, targetStats.ForcedToolChoiceNormalized)
+	}
+
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())

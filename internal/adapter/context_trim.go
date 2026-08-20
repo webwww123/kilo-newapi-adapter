@@ -43,6 +43,8 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"openrouter/free":                                    {ContextLimit: 200000, SafetyMargin: 40000, MaxInputTokens: 150000},
 	"inclusionai/ling-3.0-flash:free":                    {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"inclusionai/ling-3.0-tiny:free":                     {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
+	"tencent/hy3:free":                                   {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 128000},
+	"dots-studio/dots-3-note-preview:free":               {ContextLimit: 512000, SafetyMargin: 40000, MaxInputTokens: 400000, DefaultOutputTokens: 8192, MaxOutputTokens: 256000},
 }
 
 func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrimStats, error) {
