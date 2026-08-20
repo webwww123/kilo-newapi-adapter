@@ -874,7 +874,7 @@ func TestLingTinyAndKiloAutoStrictSchemaNeverFallsBack(t *testing.T) {
 }
 
 func TestStructuredJSONTransientFailureRetriesOnlyOnce(t *testing.T) {
-	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel, dotsNoteJSONPublicModel} {
+	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel} {
 		t.Run(model, func(t *testing.T) {
 			calls := 0
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -902,6 +902,33 @@ func TestStructuredJSONTransientFailureRetriesOnlyOnce(t *testing.T) {
 				t.Fatalf("transient detail leaked: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestDotsStructuredJSONTransientFailureDoesNotRetry(t *testing.T) {
+	calls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, `{"error":{"message":"PRIVATE_TRANSIENT"}}`)
+	}))
+	defer upstream.Close()
+
+	base := newBaseHandler(Config{UpstreamBaseURL: upstream.URL, HTTPClient: upstream.Client(), RequestLogDir: t.TempDir()})
+	waits := 0
+	base.retryWait = func(context.Context, time.Duration) error {
+		waits++
+		return nil
+	}
+	handler := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"`+dotsNoteJSONPublicModel+`","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != http.StatusInternalServerError || calls != 1 || waits != 0 {
+		t.Fatalf("status=%d calls=%d waits=%d body=%s", rec.Code, calls, waits, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "PRIVATE_TRANSIENT") {
+		t.Fatalf("transient detail leaked: %s", rec.Body.String())
 	}
 }
 
