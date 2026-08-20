@@ -550,15 +550,16 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		publicModel   string
 		format        string
 		stream        bool
+		targetBudget  bool
 	}{
-		{name: "tencent_object", requestModel: "tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: `{"type":"json_object"}`},
-		{name: "tencent_schema_stream", requestModel: "kilo/tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: schemaFormat, stream: true},
+		{name: "tencent_object", requestModel: "tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: `{"type":"json_object"}`, targetBudget: true},
+		{name: "tencent_schema_stream", requestModel: "kilo/tencent/hy3:free", upstreamModel: "tencent/hy3:free", publicModel: "kilo/tencent/hy3:free", format: schemaFormat, stream: true, targetBudget: true},
 		{name: "openrouter_unprefixed_schema", requestModel: "openrouter/free", upstreamModel: "openrouter/free", publicModel: "kilo/openrouter/free", format: schemaFormat},
 		{name: "openrouter_prefixed_schema_stream", requestModel: "kilo/openrouter/free", upstreamModel: "openrouter/free", publicModel: "kilo/openrouter/free", format: schemaFormat, stream: true},
 		{name: "north_object", requestModel: "cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: `{"type":"json_object"}`},
 		{name: "north_schema_stream", requestModel: "kilo/cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: schemaFormat, stream: true},
-		{name: "dots_object_stream", requestModel: "kilo/dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: `{"type":"json_object"}`, stream: true},
-		{name: "dots_schema", requestModel: "dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: schemaFormat},
+		{name: "dots_object_stream", requestModel: "kilo/dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: `{"type":"json_object"}`, stream: true, targetBudget: true},
+		{name: "dots_schema", requestModel: "dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: schemaFormat, targetBudget: true},
 	}
 
 	for _, tc := range tests {
@@ -598,7 +599,18 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 					t.Fatalf("call %d forwarded response_format: %#v", index+1, call)
 				}
 			}
-			if (*calls)[0]["max_tokens"] != float64(lingJSONFirstOutputFloor) || (*calls)[1]["max_tokens"] != float64(lingJSONRepairOutputFloor) {
+			wantFirst := float64(lingJSONFirstOutputFloor)
+			wantRepair := float64(lingJSONRepairOutputFloor)
+			if tc.targetBudget {
+				wantFirst = float64(targetModelMinOutputTokens)
+				wantRepair = float64(targetModelMinOutputTokens)
+				for index, call := range *calls {
+					if call["reasoning_effort"] != targetMinimalReasoningEffort {
+						t.Fatalf("call %d reasoning effort wrong: %#v", index+1, call)
+					}
+				}
+			}
+			if (*calls)[0]["max_tokens"] != wantFirst || (*calls)[1]["max_tokens"] != wantRepair {
 				t.Fatalf("output floors wrong: %#v", *calls)
 			}
 			if !strings.Contains(rec.Body.String(), tc.publicModel) {

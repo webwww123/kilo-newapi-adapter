@@ -8,14 +8,16 @@ import (
 
 const (
 	dotsStudioNotePreviewFreeModel = "dots-studio/dots-3-note-preview:free"
-	hy3MessagesMinOutputTokens     = 256
-	dotsResponsesMinOutputTokens   = 512
+	targetModelMinOutputTokens     = 8192
+	targetMessagesThinkingTokens   = 1024
+	targetMinimalReasoningEffort   = "minimal"
 )
 
 type targetModelCompatStats struct {
 	Model                      string
 	Changed                    bool
-	LowOutputRaised            bool
+	OutputBudgetNormalized     bool
+	ReasoningNormalized        bool
 	ForcedToolChoiceNormalized bool
 }
 
@@ -32,22 +34,22 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	path := strings.TrimRight(strings.TrimSpace(upstreamPath), "/")
 
 	switch model {
-	case tencentHY3FreeModel:
-		if path == "/messages" && raiseTargetOutputFloor(payload, "max_tokens", hy3MessagesMinOutputTokens) {
-			stats.LowOutputRaised = true
-		}
-		if path == "/chat/completions" && normalizeHY3ForcedFunctionChoice(payload) {
-			stats.ForcedToolChoiceNormalized = true
-		}
-	case dotsStudioNotePreviewFreeModel:
-		if path == "/responses" && raiseTargetOutputFloor(payload, "max_output_tokens", dotsResponsesMinOutputTokens) {
-			stats.LowOutputRaised = true
-		}
+	case tencentHY3FreeModel, dotsStudioNotePreviewFreeModel:
 	default:
 		return body, stats, nil
 	}
 
-	stats.Changed = stats.LowOutputRaised || stats.ForcedToolChoiceNormalized
+	if normalizeTargetReasoning(payload, path) {
+		stats.ReasoningNormalized = true
+	}
+	if normalizeTargetOutputBudget(payload, path, targetModelMinOutputTokens) {
+		stats.OutputBudgetNormalized = true
+	}
+	if model == tencentHY3FreeModel && path == "/chat/completions" && normalizeHY3ForcedFunctionChoice(payload) {
+		stats.ForcedToolChoiceNormalized = true
+	}
+
+	stats.Changed = stats.OutputBudgetNormalized || stats.ReasoningNormalized || stats.ForcedToolChoiceNormalized
 	if !stats.Changed {
 		return body, stats, nil
 	}
@@ -58,13 +60,81 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	return out, stats, nil
 }
 
-func raiseTargetOutputFloor(payload map[string]any, field string, minimum int) bool {
-	value, ok := payload[field].(float64)
-	if !ok || value <= 0 || value >= float64(minimum) {
+func normalizeTargetReasoning(payload map[string]any, path string) bool {
+	remove := func(key string) bool {
+		if _, exists := payload[key]; !exists {
+			return false
+		}
+		delete(payload, key)
+		return true
+	}
+
+	changed := false
+	switch path {
+	case "/chat/completions":
+		changed = remove("reasoning") || changed
+		changed = remove("thinking") || changed
+		if effort, ok := payload["reasoning_effort"].(string); !ok || strings.ToLower(strings.TrimSpace(effort)) != targetMinimalReasoningEffort {
+			payload["reasoning_effort"] = targetMinimalReasoningEffort
+			changed = true
+		}
+	case "/messages":
+		changed = remove("reasoning_effort") || changed
+		changed = remove("reasoning") || changed
+		thinking, ok := payload["thinking"].(map[string]any)
+		if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(targetMessagesThinkingTokens) || len(thinking) != 2 {
+			payload["thinking"] = map[string]any{
+				"type":          "enabled",
+				"budget_tokens": float64(targetMessagesThinkingTokens),
+			}
+			changed = true
+		}
+	case "/responses":
+		changed = remove("reasoning_effort") || changed
+		changed = remove("thinking") || changed
+		reasoning, ok := payload["reasoning"].(map[string]any)
+		if !ok || reasoning["effort"] != targetMinimalReasoningEffort || len(reasoning) != 1 {
+			payload["reasoning"] = map[string]any{"effort": targetMinimalReasoningEffort}
+			changed = true
+		}
+	}
+	return changed
+}
+
+func normalizeTargetOutputBudget(payload map[string]any, path string, minimum int) bool {
+	canonical := ""
+	switch path {
+	case "/chat/completions", "/messages":
+		canonical = "max_tokens"
+	case "/responses":
+		canonical = "max_output_tokens"
+	default:
 		return false
 	}
-	payload[field] = float64(minimum)
-	return true
+
+	budget := float64(minimum)
+	fields := []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
+	for _, field := range fields {
+		if value, ok := payload[field].(float64); ok && value > budget {
+			budget = value
+		}
+	}
+
+	changed := false
+	for _, field := range fields {
+		if field == canonical {
+			continue
+		}
+		if _, exists := payload[field]; exists {
+			delete(payload, field)
+			changed = true
+		}
+	}
+	if value, ok := payload[canonical].(float64); !ok || value != budget {
+		payload[canonical] = budget
+		changed = true
+	}
+	return changed
 }
 
 func normalizeHY3ForcedFunctionChoice(payload map[string]any) bool {

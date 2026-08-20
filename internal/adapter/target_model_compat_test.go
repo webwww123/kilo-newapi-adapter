@@ -2,45 +2,66 @@ package adapter
 
 import "testing"
 
-func TestTargetFreeModelsRaiseOnlyProvenLowOutputLimits(t *testing.T) {
+func TestTargetFreeModelsNormalizeOutputBudgetsAcrossProtocols(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()
 
 	handler := newTestHandler(upstream.URL)
 	tests := []struct {
-		name      string
-		path      string
-		body      string
-		field     string
-		wantLimit float64
+		name       string
+		path       string
+		body       string
+		field      string
+		wantLimit  float64
+		absentKeys []string
 	}{
 		{
-			name:      "hy3 messages raises low max tokens",
-			path:      "/v1/messages",
-			body:      `{"model":"kilo/tencent/hy3:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
-			field:     "max_tokens",
-			wantLimit: 256,
+			name:       "hy3 chat preserves the highest client budget under the canonical field",
+			path:       "/v1/chat/completions",
+			body:       `{"model":"kilo/tencent/hy3:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64,"max_completion_tokens":12000,"max_output_tokens":256}`,
+			field:      "max_tokens",
+			wantLimit:  12000,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
 		},
 		{
-			name:      "hy3 chat remains unchanged",
-			path:      "/v1/chat/completions",
-			body:      `{"model":"kilo/tencent/hy3:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
-			field:     "max_tokens",
-			wantLimit: 64,
+			name:       "dots chat adds the default floor when absent",
+			path:       "/v1/chat/completions",
+			body:       `{"model":"kilo/dots-studio/dots-3-note-preview:free","messages":[{"role":"user","content":"hi"}]}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
 		},
 		{
-			name:      "dots responses raises low max output tokens",
-			path:      "/v1/responses",
-			body:      `{"model":"kilo/dots-studio/dots-3-note-preview:free","input":"hi","max_output_tokens":256}`,
-			field:     "max_output_tokens",
-			wantLimit: 512,
+			name:       "hy3 messages raises a low budget",
+			path:       "/v1/messages",
+			body:       `{"model":"kilo/tencent/hy3:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
 		},
 		{
-			name:      "dots chat remains unchanged",
-			path:      "/v1/chat/completions",
-			body:      `{"model":"kilo/dots-studio/dots-3-note-preview:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
-			field:     "max_tokens",
-			wantLimit: 64,
+			name:       "dots messages raises a low alias budget",
+			path:       "/v1/messages",
+			body:       `{"model":"kilo/dots-studio/dots-3-note-preview:free","messages":[{"role":"user","content":"hi"}],"max_completion_tokens":512}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
+		},
+		{
+			name:       "hy3 responses preserves a higher alias budget",
+			path:       "/v1/responses",
+			body:       `{"model":"kilo/tencent/hy3:free","input":"hi","max_tokens":16000,"max_output_tokens":256}`,
+			field:      "max_output_tokens",
+			wantLimit:  16000,
+			absentKeys: []string{"max_tokens", "max_completion_tokens"},
+		},
+		{
+			name:       "dots responses raises a low budget",
+			path:       "/v1/responses",
+			body:       `{"model":"kilo/dots-studio/dots-3-note-preview:free","input":"hi","max_output_tokens":256}`,
+			field:      "max_output_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_tokens", "max_completion_tokens"},
 		},
 	}
 
@@ -57,7 +78,116 @@ func TestTargetFreeModelsRaiseOnlyProvenLowOutputLimits(t *testing.T) {
 			if got := (*calls)[before].Body[tc.field]; got != tc.wantLimit {
 				t.Fatalf("%s=%#v want=%v body=%#v", tc.field, got, tc.wantLimit, (*calls)[before].Body)
 			}
+			for _, key := range tc.absentKeys {
+				if _, exists := (*calls)[before].Body[key]; exists {
+					t.Fatalf("unexpected %s in body=%#v", key, (*calls)[before].Body)
+				}
+			}
 		})
+	}
+}
+
+func TestTargetFreeModelsForceMinimumReasoningAcrossProtocols(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	for _, model := range []string{"kilo/tencent/hy3:free", "kilo/dots-studio/dots-3-note-preview:free"} {
+		t.Run(model+" chat", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/chat/completions", `{
+				"model":"`+model+`",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"high",
+				"reasoning":{"enabled":false,"effort":"high","max_tokens":32000},
+				"thinking":{"type":"enabled","budget_tokens":32000}
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			if call["reasoning_effort"] != "minimal" {
+				t.Fatalf("reasoning_effort=%#v body=%#v", call["reasoning_effort"], call)
+			}
+			for _, key := range []string{"reasoning", "thinking"} {
+				if _, exists := call[key]; exists {
+					t.Fatalf("unexpected %s in body=%#v", key, call)
+				}
+			}
+		})
+
+		t.Run(model+" messages", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/messages", `{
+				"model":"`+model+`",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"high",
+				"reasoning":{"effort":"high"},
+				"thinking":{"type":"enabled","budget_tokens":32000}
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			thinking, ok := call["thinking"].(map[string]any)
+			if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(1024) {
+				t.Fatalf("thinking=%#v body=%#v", call["thinking"], call)
+			}
+			for _, key := range []string{"reasoning_effort", "reasoning"} {
+				if _, exists := call[key]; exists {
+					t.Fatalf("unexpected %s in body=%#v", key, call)
+				}
+			}
+		})
+
+		t.Run(model+" responses", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/responses", `{
+				"model":"`+model+`",
+				"input":"hi",
+				"reasoning_effort":"high",
+				"reasoning":{"enabled":false,"effort":"high","max_tokens":32000},
+				"thinking":{"type":"enabled","budget_tokens":32000}
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			reasoning, ok := call["reasoning"].(map[string]any)
+			if !ok || reasoning["effort"] != "minimal" || len(reasoning) != 1 {
+				t.Fatalf("reasoning=%#v body=%#v", call["reasoning"], call)
+			}
+			for _, key := range []string{"reasoning_effort", "thinking"} {
+				if _, exists := call[key]; exists {
+					t.Fatalf("unexpected %s in body=%#v", key, call)
+				}
+			}
+		})
+	}
+}
+
+func TestTargetSiblingReasoningAndOutputRemainUnchanged(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/cohere/north-mini-code:free",
+		"messages":[{"role":"user","content":"hi"}],
+		"reasoning_effort":"high",
+		"reasoning":{"max_tokens":32000},
+		"max_tokens":64
+	}`)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	call := (*calls)[0].Body
+	if call["reasoning_effort"] != "high" || call["max_tokens"] != float64(64) {
+		t.Fatalf("sibling fields changed: %#v", call)
+	}
+	reasoning, ok := call["reasoning"].(map[string]any)
+	if !ok || reasoning["max_tokens"] != float64(32000) {
+		t.Fatalf("sibling reasoning changed: %#v", call["reasoning"])
 	}
 }
 

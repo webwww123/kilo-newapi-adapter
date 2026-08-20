@@ -295,8 +295,8 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 	if targetStats.Changed {
-		fmt.Printf("kilo_target_compat path=%s model=%s low_output_raised=%t forced_tool_choice_normalized=%t\n",
-			upstreamPath, targetStats.Model, targetStats.LowOutputRaised, targetStats.ForcedToolChoiceNormalized)
+		fmt.Printf("kilo_target_compat path=%s model=%s output_budget_normalized=%t reasoning_normalized=%t forced_tool_choice_normalized=%t\n",
+			upstreamPath, targetStats.Model, targetStats.OutputBudgetNormalized, targetStats.ReasoningNormalized, targetStats.ForcedToolChoiceNormalized)
 	}
 
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)
