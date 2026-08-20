@@ -557,6 +557,8 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		{name: "openrouter_prefixed_schema_stream", requestModel: "kilo/openrouter/free", upstreamModel: "openrouter/free", publicModel: "kilo/openrouter/free", format: schemaFormat, stream: true},
 		{name: "north_object", requestModel: "cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: `{"type":"json_object"}`},
 		{name: "north_schema_stream", requestModel: "kilo/cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: schemaFormat, stream: true},
+		{name: "dots_object_stream", requestModel: "kilo/dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: `{"type":"json_object"}`, stream: true},
+		{name: "dots_schema", requestModel: "dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: schemaFormat},
 	}
 
 	for _, tc := range tests {
@@ -632,9 +634,22 @@ func TestKiloTargetFreeModelsKeepOrdinaryToolsAndSiblingStructuredRequestsUnchan
 		t.Fatalf("sibling response_format was intercepted: %#v", (*calls)[1])
 	}
 
+	dotsOrdinary := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/dots-studio/dots-3-note-preview:free","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+	if dotsOrdinary.Code != http.StatusOK || len(*calls) != 3 {
+		t.Fatalf("dots ordinary status=%d calls=%d body=%s", dotsOrdinary.Code, len(*calls), dotsOrdinary.Body.String())
+	}
+	if (*calls)[2]["model"] != dotsStudioNotePreviewFreeModel || (*calls)[2]["tool_choice"] != "auto" || len((*calls)[2]["tools"].([]any)) != 1 {
+		t.Fatalf("dots ordinary tools changed: %#v", (*calls)[2])
+	}
+
 	combined := postJSON(t, handler, "/v1/chat/completions", `{"model":"openrouter/free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
-	if combined.Code != http.StatusBadRequest || len(*calls) != 2 || !strings.Contains(combined.Body.String(), publicClientErrorMessage) {
+	if combined.Code != http.StatusBadRequest || len(*calls) != 3 || !strings.Contains(combined.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("combined status=%d calls=%d body=%s", combined.Code, len(*calls), combined.Body.String())
+	}
+
+	dotsCombined := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/dots-studio/dots-3-note-preview:free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
+	if dotsCombined.Code != http.StatusBadRequest || len(*calls) != 3 || !strings.Contains(dotsCombined.Body.String(), publicClientErrorMessage) {
+		t.Fatalf("dots combined status=%d calls=%d body=%s", dotsCombined.Code, len(*calls), dotsCombined.Body.String())
 	}
 }
 
@@ -859,7 +874,7 @@ func TestLingTinyAndKiloAutoStrictSchemaNeverFallsBack(t *testing.T) {
 }
 
 func TestStructuredJSONTransientFailureRetriesOnlyOnce(t *testing.T) {
-	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel} {
+	for _, model := range []string{lingTinyJSONPublicModel, kiloAutoJSONPublicModel, dotsNoteJSONPublicModel} {
 		t.Run(model, func(t *testing.T) {
 			calls := 0
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

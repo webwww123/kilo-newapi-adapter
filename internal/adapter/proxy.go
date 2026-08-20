@@ -1019,7 +1019,7 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 }
 
 func (h *Handler) forwardWithModelRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
-	if isStructuredJSONRetryRequest(original) && (publicModel == prefixPublicModel(lingTinyFreeModel) || publicModel == kiloAutoJSONPublicModel) {
+	if isStructuredJSONRetryRequest(original) && (publicModel == prefixPublicModel(lingTinyFreeModel) || publicModel == kiloAutoJSONPublicModel || publicModel == dotsNoteJSONPublicModel) {
 		return h.forwardWithStructuredJSONRetry(original, upstreamPath, body, publicModel)
 	}
 	if publicModel == prefixPublicModel(lingTinyFreeModel) {

@@ -32,6 +32,7 @@ const (
 	openRouterJSONPublicModel        = publicModelPrefix + openRouterFreeModel
 	northMiniCodeFreeModel           = "cohere/north-mini-code:free"
 	northMiniCodeJSONPublicModel     = publicModelPrefix + northMiniCodeFreeModel
+	dotsNoteJSONPublicModel          = publicModelPrefix + dotsStudioNotePreviewFreeModel
 	lingJSONMaxSchemaBytes           = 64 << 10
 	lingJSONMaxRepairBytes           = 64 << 10
 	lingJSONFirstOutputFloor         = 256
@@ -463,6 +464,8 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "openrouter_free", openRouterJSONPublicModel, true
 	case northMiniCodeJSONPublicModel, northMiniCodeFreeModel:
 		return "north_mini_code", northMiniCodeJSONPublicModel, true
+	case dotsNoteJSONPublicModel, dotsStudioNotePreviewFreeModel:
+		return "dots_note", dotsNoteJSONPublicModel, true
 	default:
 		return "", "", false
 	}
