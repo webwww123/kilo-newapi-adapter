@@ -1,0 +1,55 @@
+name: release-artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.4"
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Race test
+        run: go test -race ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build Linux amd64
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w" -o dist/kilo-newapi-adapter ./cmd/kilo-newapi-adapter
+          sha256sum dist/kilo-newapi-adapter
+
+      - name: Publish commit-scoped prerelease asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ci-${GITHUB_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists" >&2
+            exit 1
+          fi
+          gh release create "$tag" \
+            dist/kilo-newapi-adapter \
+            --target "$GITHUB_SHA" \
+            --title "CI artifact ${GITHUB_SHA}" \
+            --notes "GitHub Actions tested Linux amd64 build for ${GITHUB_SHA}." \
+            --prerelease
