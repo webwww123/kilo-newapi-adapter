@@ -2,7 +2,7 @@
 
 ## Scope
 
-- Models: `kilo/inclusionai/ling-3.0-tiny:free`, `kilo/inclusionai/ling-3.0-flash:free`, `kilo/stepfun/step-3.7-flash:free`, `kilo/kilo-auto/free`, `kilo/nvidia/nemotron-3-ultra-550b-a55b:free`, `kilo/nvidia/nemotron-3.5-lightning:free`, `kilo/tencent/hy3:free`, `kilo/openrouter/free`, and `kilo/cohere/north-mini-code:free` (prefixed or unprefixed internal forms).
+- Models: `kilo/inclusionai/ling-3.0-tiny:free`, `kilo/inclusionai/ling-3.0-flash:free`, `kilo/stepfun/step-3.7-flash:free`, `kilo/kilo-auto/free`, `kilo/nvidia/nemotron-3-ultra-550b-a55b:free`, `kilo/nvidia/nemotron-3.5-lightning:free`, `kilo/tencent/hy3:free`, `kilo/thinkingmachines/inkling-small:free`, `kilo/thinkingmachines/inkling:free`, `kilo/openrouter/free`, and `kilo/cohere/north-mini-code:free` (prefixed or unprefixed internal forms).
 - Endpoint: OpenAI Chat Completions only.
 - Formats: `json_object` and local strict `json_schema` validation.
 - Ordinary requests, other models, Responses, Messages, and tools without `response_format` are unchanged.
@@ -17,7 +17,7 @@
 - Validated non-stream responses remove reasoning-related fields; SSE emits only canonical JSON content.
 - Streaming is buffered upstream and emitted as standard SSE only after validation.
 - Tools combined with `response_format`, malformed formats, external schema references, and final validation failures return the existing generic public error policy.
-- Tencent HY3, OpenRouter Free, and Cohere North Mini Code are exact model profiles. Their ordinary requests and tools remain on the existing path; only Chat Completions requests with `response_format` enter the compatibility layer.
+- Tencent HY3, Inkling Small, Inkling, OpenRouter Free, and Cohere North Mini Code are exact model profiles. Their ordinary requests and tools remain on the existing path; only Chat Completions requests with `response_format` enter the compatibility layer.
 
 ## Observability
 
@@ -32,3 +32,5 @@ On 2026-08-07, StepFun was added after direct native probes repeatedly returned 
 Kilo Auto and Nemotron Ultra were later scoped from the full-site audit. Auto violated conflicting object and Schema instructions; Ultra produced embedded error envelopes for conflicting object and ordinary Schema requests. Both reuse the same bounded, same-model validation and repair path while ordinary requests and tools remain unchanged.
 
 On 2026-08-13, current production probes showed HTTP 200 invalid JSON for Tencent HY3, OpenRouter Free, Cohere North Mini Code, and the `kilo/openrouter/free` route. They were added as exact profiles using the same local validation, one bounded repair, buffered streaming, and fail-closed behavior; sibling models remain untouched.
+
+On 2026-08-22, forced NewAPI acceptance for Inkling Small and Inkling passed all protocols and tools but repeatedly returned HTTP 200 invalid object/Schema output, with additional structured requests hanging until the bounded client timeout. Both exact profiles now reuse the same validation, one bounded repair, buffered streaming, and fail-closed behavior; their ordinary requests and tools remain unchanged.

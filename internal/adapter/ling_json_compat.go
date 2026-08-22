@@ -33,6 +33,8 @@ const (
 	northMiniCodeFreeModel           = "cohere/north-mini-code:free"
 	northMiniCodeJSONPublicModel     = publicModelPrefix + northMiniCodeFreeModel
 	dotsNoteJSONPublicModel          = publicModelPrefix + dotsStudioNotePreviewFreeModel
+	inklingSmallJSONPublicModel      = publicModelPrefix + thinkingMachinesInklingSmallFreeModel
+	inklingJSONPublicModel           = publicModelPrefix + thinkingMachinesInklingFreeModel
 	lingJSONMaxSchemaBytes           = 64 << 10
 	lingJSONMaxRepairBytes           = 64 << 10
 	lingJSONFirstOutputFloor         = 256
@@ -466,6 +468,10 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "north_mini_code", northMiniCodeJSONPublicModel, true
 	case dotsNoteJSONPublicModel, dotsStudioNotePreviewFreeModel:
 		return "dots_note", dotsNoteJSONPublicModel, true
+	case inklingSmallJSONPublicModel, thinkingMachinesInklingSmallFreeModel:
+		return "inkling_small", inklingSmallJSONPublicModel, true
+	case inklingJSONPublicModel, thinkingMachinesInklingFreeModel:
+		return "inkling", inklingJSONPublicModel, true
 	default:
 		return "", "", false
 	}

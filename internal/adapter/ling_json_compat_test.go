@@ -560,6 +560,10 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		{name: "north_schema_stream", requestModel: "kilo/cohere/north-mini-code:free", upstreamModel: "cohere/north-mini-code:free", publicModel: "kilo/cohere/north-mini-code:free", format: schemaFormat, stream: true},
 		{name: "dots_object_stream", requestModel: "kilo/dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: `{"type":"json_object"}`, stream: true, targetBudget: true},
 		{name: "dots_schema", requestModel: "dots-studio/dots-3-note-preview:free", upstreamModel: "dots-studio/dots-3-note-preview:free", publicModel: "kilo/dots-studio/dots-3-note-preview:free", format: schemaFormat, targetBudget: true},
+		{name: "inkling_small_object_stream", requestModel: "kilo/thinkingmachines/inkling-small:free", upstreamModel: "thinkingmachines/inkling-small:free", publicModel: "kilo/thinkingmachines/inkling-small:free", format: `{"type":"json_object"}`, stream: true, targetBudget: true},
+		{name: "inkling_small_schema", requestModel: "thinkingmachines/inkling-small:free", upstreamModel: "thinkingmachines/inkling-small:free", publicModel: "kilo/thinkingmachines/inkling-small:free", format: schemaFormat, targetBudget: true},
+		{name: "inkling_object", requestModel: "thinkingmachines/inkling:free", upstreamModel: "thinkingmachines/inkling:free", publicModel: "kilo/thinkingmachines/inkling:free", format: `{"type":"json_object"}`, targetBudget: true},
+		{name: "inkling_schema_stream", requestModel: "kilo/thinkingmachines/inkling:free", upstreamModel: "thinkingmachines/inkling:free", publicModel: "kilo/thinkingmachines/inkling:free", format: schemaFormat, stream: true, targetBudget: true},
 	}
 
 	for _, tc := range tests {
@@ -654,14 +658,27 @@ func TestKiloTargetFreeModelsKeepOrdinaryToolsAndSiblingStructuredRequestsUnchan
 		t.Fatalf("dots ordinary tools changed: %#v", (*calls)[2])
 	}
 
+	inklingOrdinary := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/thinkingmachines/inkling-small:free","tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"tool_choice":"auto","messages":[{"role":"user","content":"use lookup if needed"}]}`)
+	if inklingOrdinary.Code != http.StatusOK || len(*calls) != 4 {
+		t.Fatalf("inkling ordinary status=%d calls=%d body=%s", inklingOrdinary.Code, len(*calls), inklingOrdinary.Body.String())
+	}
+	if (*calls)[3]["model"] != thinkingMachinesInklingSmallFreeModel || (*calls)[3]["tool_choice"] != "auto" || len((*calls)[3]["tools"].([]any)) != 1 {
+		t.Fatalf("inkling ordinary tools changed: %#v", (*calls)[3])
+	}
+
 	combined := postJSON(t, handler, "/v1/chat/completions", `{"model":"openrouter/free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
-	if combined.Code != http.StatusBadRequest || len(*calls) != 3 || !strings.Contains(combined.Body.String(), publicClientErrorMessage) {
+	if combined.Code != http.StatusBadRequest || len(*calls) != 4 || !strings.Contains(combined.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("combined status=%d calls=%d body=%s", combined.Code, len(*calls), combined.Body.String())
 	}
 
 	dotsCombined := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/dots-studio/dots-3-note-preview:free","response_format":{"type":"json_object"},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
-	if dotsCombined.Code != http.StatusBadRequest || len(*calls) != 3 || !strings.Contains(dotsCombined.Body.String(), publicClientErrorMessage) {
+	if dotsCombined.Code != http.StatusBadRequest || len(*calls) != 4 || !strings.Contains(dotsCombined.Body.String(), publicClientErrorMessage) {
 		t.Fatalf("dots combined status=%d calls=%d body=%s", dotsCombined.Code, len(*calls), dotsCombined.Body.String())
+	}
+
+	inklingCombined := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/thinkingmachines/inkling:free","response_format":{"type":"json_schema","json_schema":{"name":"answer","schema":{"type":"object"}}},"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}],"messages":[{"role":"user","content":"use lookup"}]}`)
+	if inklingCombined.Code != http.StatusBadRequest || len(*calls) != 4 || !strings.Contains(inklingCombined.Body.String(), publicClientErrorMessage) {
+		t.Fatalf("inkling combined status=%d calls=%d body=%s", inklingCombined.Code, len(*calls), inklingCombined.Body.String())
 	}
 }
 
