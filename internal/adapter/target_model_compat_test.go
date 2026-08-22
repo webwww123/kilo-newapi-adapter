@@ -63,6 +63,30 @@ func TestTargetFreeModelsNormalizeOutputBudgetsAcrossProtocols(t *testing.T) {
 			wantLimit:  8192,
 			absentKeys: []string{"max_tokens", "max_completion_tokens"},
 		},
+		{
+			name:       "inkling small chat raises a low budget",
+			path:       "/v1/chat/completions",
+			body:       `{"model":"kilo/thinkingmachines/inkling-small:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
+		},
+		{
+			name:       "inkling messages adds the default floor",
+			path:       "/v1/messages",
+			body:       `{"model":"kilo/thinkingmachines/inkling:free","messages":[{"role":"user","content":"hi"}]}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
+		},
+		{
+			name:       "inkling responses preserves a higher budget",
+			path:       "/v1/responses",
+			body:       `{"model":"kilo/thinkingmachines/inkling:free","input":"hi","max_tokens":16000,"max_output_tokens":64}`,
+			field:      "max_output_tokens",
+			wantLimit:  16000,
+			absentKeys: []string{"max_tokens", "max_completion_tokens"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -92,7 +116,12 @@ func TestTargetFreeModelsForceMinimumReasoningAcrossProtocols(t *testing.T) {
 	defer upstream.Close()
 
 	handler := newTestHandler(upstream.URL)
-	for _, model := range []string{"kilo/tencent/hy3:free", "kilo/dots-studio/dots-3-note-preview:free"} {
+	for _, model := range []string{
+		"kilo/tencent/hy3:free",
+		"kilo/dots-studio/dots-3-note-preview:free",
+		"kilo/thinkingmachines/inkling-small:free",
+		"kilo/thinkingmachines/inkling:free",
+	} {
 		t.Run(model+" chat", func(t *testing.T) {
 			before := len(*calls)
 			rec := postJSON(t, handler, "/v1/chat/completions", `{

@@ -1364,6 +1364,30 @@ func TestLingFreeModelsUseActual262KContextLimit(t *testing.T) {
 	}
 }
 
+func TestInklingFreeModelsUseExplicit262KContextAndOutputProfile(t *testing.T) {
+	want := contextTrimProfile{
+		ContextLimit:        262144,
+		SafetyMargin:        40000,
+		MaxInputTokens:      200000,
+		DefaultOutputTokens: 8192,
+		MaxOutputTokens:     262144,
+	}
+	for _, model := range []string{
+		thinkingMachinesInklingSmallFreeModel,
+		thinkingMachinesInklingFreeModel,
+	} {
+		t.Run(model, func(t *testing.T) {
+			profile, ok := freeContextTrimProfiles[model]
+			if !ok {
+				t.Fatalf("%s context trim profile is missing", model)
+			}
+			if profile != want {
+				t.Fatalf("%s context trim profile = %#v, want %#v", model, profile, want)
+			}
+		})
+	}
+}
+
 func TestPoolsideXS21TruncatesOversizedLatestContentParts(t *testing.T) {
 	upstream, calls := newRecordingUpstream(t)
 	defer upstream.Close()

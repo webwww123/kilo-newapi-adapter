@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	dotsStudioNotePreviewFreeModel = "dots-studio/dots-3-note-preview:free"
-	targetModelMinOutputTokens     = 8192
-	targetMessagesThinkingTokens   = 1024
-	targetMinimalReasoningEffort   = "minimal"
+	dotsStudioNotePreviewFreeModel        = "dots-studio/dots-3-note-preview:free"
+	thinkingMachinesInklingSmallFreeModel = "thinkingmachines/inkling-small:free"
+	thinkingMachinesInklingFreeModel      = "thinkingmachines/inkling:free"
+	targetModelMinOutputTokens            = 8192
+	targetMessagesThinkingTokens          = 1024
+	targetMinimalReasoningEffort          = "minimal"
 )
 
 type targetModelCompatStats struct {
@@ -34,7 +36,10 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	path := strings.TrimRight(strings.TrimSpace(upstreamPath), "/")
 
 	switch model {
-	case tencentHY3FreeModel, dotsStudioNotePreviewFreeModel:
+	case tencentHY3FreeModel,
+		dotsStudioNotePreviewFreeModel,
+		thinkingMachinesInklingSmallFreeModel,
+		thinkingMachinesInklingFreeModel:
 	default:
 		return body, stats, nil
 	}

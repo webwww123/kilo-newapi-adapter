@@ -1,0 +1,22 @@
+[Unit]
+Description=Kilo NewAPI Adapter for isolated Inkling routes
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/kilo-newapi-adapter.env
+Environment=ADDR=172.17.0.1:18476
+Environment=REQUEST_LOG_DIR=/var/log/kilo-newapi-adapter-inkling
+Environment=TRUSTED_NEWAPI_ERROR_DIAGNOSTICS=true
+ExecStart=/usr/local/bin/kilo-newapi-adapter-inkling
+Restart=always
+RestartSec=3
+User=root
+WorkingDirectory=/opt/kilo-newapi-adapter
+
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
