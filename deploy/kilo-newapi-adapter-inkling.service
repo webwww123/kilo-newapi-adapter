@@ -6,8 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 EnvironmentFile=-/etc/kilo-newapi-adapter.env
-Environment=ADDR=172.17.0.1:18476
-Environment=REQUEST_LOG_DIR=/var/log/kilo-newapi-adapter-inkling
+EnvironmentFile=/etc/kilo-newapi-adapter-inkling.conf
 Environment=TRUSTED_NEWAPI_ERROR_DIAGNOSTICS=true
 ExecStart=/usr/local/bin/kilo-newapi-adapter-inkling
 Restart=always
