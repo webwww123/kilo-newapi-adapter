@@ -58,6 +58,7 @@ REQUEST_LOG_DIR=/var/log/kilo-newapi-adapter
 REQUEST_LOG_RETENTION=48h
 REQUEST_LOG_BODY_LIMIT=1048576
 KILO_AUTO_RELIABILITY_ENABLED=false
+KILO_AUTO_REQUEST_COMPAT_ENABLED=false
 ```
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
@@ -116,6 +117,8 @@ Schema-valid object. If local salvage is unavailable, StepFun retries once with 
 models, protocols, ordinary requests, and tool calls without `response_format` are left unchanged.
 
 When `KILO_AUTO_RELIABILITY_ENABLED=true`, ordinary OpenAI Chat requests for `kilo/kilo-auto/free` use a model-scoped visible-output guard. The default is `false`, so deploying a new binary does not activate the prototype without an explicit service configuration change. No-tool first attempts receive a maximum hidden-reasoning budget of 512 tokens unless the client already selected a lower limit or explicitly disabled reasoning; successful tool requests remain unchanged. A non-stream response that is empty, lacks a finish reason, or ends by output length is held locally and repaired once with a 256-token reasoning budget, a 10000-token output floor, and a compact completeness reminder. A second unusable answer becomes the existing generic public 500 instead of leaking reasoning-only output.
+
+When `KILO_AUTO_REQUEST_COMPAT_ENABLED=true`, OpenAI Chat requests for the exact Kilo Auto free model receive three conservative dirty-payload repairs before JSON validation, reliability attempts, and upstream forwarding: flat function tools with a valid name are wrapped into the standard `function` object, empty trailing user placeholders are removed only after a matching completed tool call/result turn, and a flattened `json_schema` root is promoted into the standard `json_schema.schema` field. Missing tool names, genuinely empty user requests, and malformed Schemas remain errors. Structural logs contain only repair counts and sanitized error classes; request bodies, tool arguments, headers, and credentials are never logged by this feature. The default is `false`.
 
 For ordinary Auto streaming, the adapter holds at most the first 1 MiB until visible content or a tool-call delta appears. It then commits immediately and never retries after meaningful data is emitted. If the stream ends or the prelude exceeds the bound before meaningful data, the first attempt is discarded and repaired once; a second empty/overflowing attempt becomes the generic public 500. Policy/error events are not retried. Structured JSON streaming keeps using the separate validated JSON compatibility path described above.
 

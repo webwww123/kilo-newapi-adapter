@@ -7,6 +7,7 @@
 - Ordinary requests only for semantic repair; requests with `response_format` remain owned by the existing structured JSON compatibility handler.
 - Anthropic Messages and OpenAI Responses remain unchanged.
 - Activation: `KILO_AUTO_RELIABILITY_ENABLED=true`. The default is disabled.
+- Dirty-request compatibility activation: `KILO_AUTO_REQUEST_COMPAT_ENABLED=true`. The default is disabled and is independent from semantic retry behavior.
 
 ## Capability and policy profile
 
@@ -43,6 +44,9 @@ channel_profile:
 ```
 
 ## Request behavior
+
+- With request compatibility enabled, only exact Kilo Auto OpenAI Chat requests are normalized. Recoverable flat function tools are wrapped without changing their names or Schemas; missing no-argument Schemas receive an empty object Schema; trailing empty user placeholders are removed only after a matching assistant tool call and tool result; flattened strict JSON Schema roots are moved under `json_schema.schema` and then compiled by the existing validator.
+- Unrecoverable tools without a name, genuinely empty user requests, unsupported tool/format combinations, and invalid Schemas still fail closed.
 
 - No-tool first attempts receive `reasoning.max_tokens=512` when absent or higher. Lower explicit limits and explicit reasoning disablement are preserved.
 - Tool-bearing first attempts remain unchanged so the proven native tool path is protected.

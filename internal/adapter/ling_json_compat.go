@@ -52,8 +52,9 @@ const (
 )
 
 type lingJSONCompatHandler struct {
-	base         http.Handler
-	maxBodyBytes int64
+	base                         http.Handler
+	maxBodyBytes                 int64
+	kiloAutoRequestCompatEnabled bool
 }
 
 type lingJSONPreloadedBodyKey struct{}
@@ -99,13 +100,21 @@ type lingJSONBufferedWriter struct {
 }
 
 func newLingJSONCompatHandler(base http.Handler, maxBodyBytes int64) http.Handler {
+	return newLingJSONCompatHandlerWithRequestCompat(base, maxBodyBytes, false)
+}
+
+func newLingJSONCompatHandlerWithRequestCompat(base http.Handler, maxBodyBytes int64, enabled bool) http.Handler {
 	if base == nil {
 		base = http.NotFoundHandler()
 	}
 	if maxBodyBytes <= 0 {
 		maxBodyBytes = 10 << 20
 	}
-	return &lingJSONCompatHandler{base: base, maxBodyBytes: maxBodyBytes}
+	return &lingJSONCompatHandler{
+		base:                         base,
+		maxBodyBytes:                 maxBodyBytes,
+		kiloAutoRequestCompatEnabled: enabled,
+	}
 }
 
 func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +127,18 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
 		return
+	}
+	if h.kiloAutoRequestCompatEnabled {
+		var stats kiloAutoRequestCompatStats
+		body, stats, err = normalizeKiloAutoChatRequest(body)
+		if err != nil {
+			writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
+			return
+		}
+		logKiloAutoRequestCompat(stats)
+		if stats.Changed {
+			restoreLingJSONBody(r, body)
+		}
 	}
 	payload, spec, matched, parseErr := parseLingJSONRequest(body)
 	if !matched {

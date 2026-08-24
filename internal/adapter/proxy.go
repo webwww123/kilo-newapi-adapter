@@ -41,11 +41,12 @@ type Handler struct {
 
 func NewHandler(cfg Config) http.Handler {
 	base := newBaseHandler(cfg)
-	jsonCompat := newLingJSONCompatHandler(base, base.cfg.MaxBodyBytes)
+	jsonCompatRequestCompat := base.cfg.KiloAutoRequestCompatEnabled && !base.cfg.KiloAutoReliabilityEnabled
+	jsonCompat := newLingJSONCompatHandlerWithRequestCompat(base, base.cfg.MaxBodyBytes, jsonCompatRequestCompat)
 	if !base.cfg.KiloAutoReliabilityEnabled {
 		return jsonCompat
 	}
-	return newKiloAutoReliabilityHandler(jsonCompat, base.cfg.MaxBodyBytes)
+	return newKiloAutoReliabilityHandlerWithRequestCompat(jsonCompat, base.cfg.MaxBodyBytes, base.cfg.KiloAutoRequestCompatEnabled)
 }
 
 func newBaseHandler(cfg Config) *Handler {
@@ -366,6 +367,9 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 				upstreamError: readErr.Error(),
 			})
 			return
+		}
+		if resp.StatusCode == http.StatusBadRequest {
+			logKiloAutoUpstream400(upstreamPath, publicRequestModel, responseBody)
 		}
 		rawCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 		_, _ = rawCapture.Write(responseBody)

@@ -23,8 +23,9 @@ const (
 )
 
 type kiloAutoReliabilityHandler struct {
-	next         http.Handler
-	maxBodyBytes int64
+	next                         http.Handler
+	maxBodyBytes                 int64
+	kiloAutoRequestCompatEnabled bool
 }
 
 type kiloAutoRetryStateKey struct{}
@@ -57,13 +58,21 @@ type kiloAutoResponseAssessment struct {
 }
 
 func newKiloAutoReliabilityHandler(next http.Handler, maxBodyBytes int64) http.Handler {
+	return newKiloAutoReliabilityHandlerWithRequestCompat(next, maxBodyBytes, false)
+}
+
+func newKiloAutoReliabilityHandlerWithRequestCompat(next http.Handler, maxBodyBytes int64, enabled bool) http.Handler {
 	if next == nil {
 		next = http.NotFoundHandler()
 	}
 	if maxBodyBytes <= 0 {
 		maxBodyBytes = 10 << 20
 	}
-	return &kiloAutoReliabilityHandler{next: next, maxBodyBytes: maxBodyBytes}
+	return &kiloAutoReliabilityHandler{
+		next:                         next,
+		maxBodyBytes:                 maxBodyBytes,
+		kiloAutoRequestCompatEnabled: enabled,
+	}
 }
 
 func (h *kiloAutoReliabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +90,22 @@ func (h *kiloAutoReliabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 	if !autoRequest {
 		h.next.ServeHTTP(w, r)
 		return
+	}
+	if h.kiloAutoRequestCompatEnabled {
+		stats := normalizeKiloAutoChatPayload(payload)
+		logKiloAutoRequestCompat(stats)
+		if stats.Changed {
+			body, err = json.Marshal(payload)
+			if err != nil {
+				writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
+				return
+			}
+			restoreLingJSONBody(r, body)
+			stream, _ = payload["stream"].(bool)
+			tools = hasLingJSONTools(payload)
+			_, hasResponseFormat := payload["response_format"]
+			matched = !hasResponseFormat
+		}
 	}
 	r = withKiloAutoRetryState(r)
 	if !matched {
