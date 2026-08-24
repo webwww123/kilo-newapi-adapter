@@ -45,8 +45,10 @@ channel_profile:
 
 ## Request behavior
 
-- With request compatibility enabled, only exact Kilo Auto OpenAI Chat requests are normalized. Recoverable flat function tools are wrapped without changing their names or Schemas; missing no-argument Schemas receive an empty object Schema; trailing empty user placeholders are removed only after a matching assistant tool call and tool result; flattened strict JSON Schema roots are moved under `json_schema.schema` and then compiled by the existing validator.
-- Unrecoverable tools without a name, genuinely empty user requests, unsupported tool/format combinations, and invalid Schemas still fail closed.
+- With request compatibility enabled, only exact Kilo Auto OpenAI Chat requests are normalized. Recoverable flat function tools are wrapped; harmless empty/legacy Schema variants are repaired; structured or null tool-call arguments become JSON strings; unnamed tools are dropped only when `tool_choice` is absent, `auto`, or `none`; legacy `role:function` results become a matched tool result or an explicit flattened text result.
+- Message content objects and legacy content blocks are normalized into standard text/image blocks. Standard `text`, `image_url`, and `file` blocks remain unchanged; `input_text` and supported image variants are mapped; unsupported audio/video blocks are removed while preserving sibling text, with a short placeholder only when media was the sole content.
+- Trailing empty user placeholders are removed only after a matching assistant tool call and tool result. Recognizable flattened strict JSON Schema roots are moved under `json_schema.schema` and compiled by the existing validator.
+- Forced or required tools without a name, genuinely empty user requests, non-empty malformed Schemas, invalid non-empty argument strings, unsupported tool/format combinations, and ambiguous legacy tool pairings still fail closed or are flattened without inventing a call ID.
 
 - No-tool first attempts receive `reasoning.max_tokens=512` when absent or higher. Lower explicit limits and explicit reasoning disablement are preserved.
 - Tool-bearing first attempts remain unchanged so the proven native tool path is protected.
@@ -66,4 +68,6 @@ channel_profile:
 
 - `kilo_auto_reliability`: stream flag, attempt count, repair usage, reasoning-cap decision, failure classes, final status, commit state, prelude overflow, and duration.
 - `kilo_upstream_retry scope=auto`: path, public model, retry index, raw status or transport class, wait duration, and whether `Retry-After` was present.
+- `kilo_auto_request_compat`: counts only for wrapped/dropped tools, merged legacy flat tool fields, repaired Schemas, normalized arguments/roles/content, dropped media blocks, placeholders, and trailing tool placeholders.
+- `kilo_auto_400_class`: sanitized categories for message role/content, tool function/arguments/Schema/choice, sampling/output/stop fields, response format, paid auth, or unknown/non-JSON failures.
 - Neither log line contains request/response bodies, prompt text, hidden reasoning, candidate answers, tool names/arguments, headers, or credentials.

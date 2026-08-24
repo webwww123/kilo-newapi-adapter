@@ -29,6 +29,7 @@ func TestNormalizeKiloAutoChatRequestRepairsRecoverableTools(t *testing.T) {
 			{"type":"function","name":"search","input_schema":{"type":"object"}},
 			{"type":"function","function":{},"name":"hybrid"},
 			{"type":"function","function":{"name":"ping"}},
+			{"type":"function","function":{"name":"mixed"},"description":"Mixed fields","strict":true,"parameters":{"type":"object","properties":{"q":{"type":"string"}}}},
 			{"type":"function"},
 			{"type":"web_search"}
 		]
@@ -38,7 +39,7 @@ func TestNormalizeKiloAutoChatRequestRepairsRecoverableTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !stats.Matched || !stats.Changed || stats.FlatToolsWrapped != 3 || stats.ToolSchemasRepaired != 3 || stats.UnrecoverableTools != 1 {
+	if !stats.Matched || !stats.Changed || stats.FlatToolsWrapped != 3 || stats.FlatToolFieldsMerged != 1 || stats.ToolSchemasRepaired != 3 || stats.UnrecoverableTools != 1 || stats.OptionalToolsDropped != 1 {
 		t.Fatalf("unexpected stats: %#v", stats)
 	}
 	var payload map[string]any
@@ -46,6 +47,9 @@ func TestNormalizeKiloAutoChatRequestRepairsRecoverableTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	tools := payload["tools"].([]any)
+	if len(tools) != 6 {
+		t.Fatalf("tools=%d want=6 payload=%#v", len(tools), payload)
+	}
 	lookup := tools[0].(map[string]any)
 	lookupFunction := lookup["function"].(map[string]any)
 	if lookupFunction["name"] != "lookup" || lookupFunction["description"] != "Lookup data" || lookupFunction["strict"] != true {
@@ -72,11 +76,163 @@ func TestNormalizeKiloAutoChatRequestRepairsRecoverableTools(t *testing.T) {
 	if pingParameters["type"] != "object" {
 		t.Fatalf("missing no-argument schema was not defaulted: %#v", pingParameters)
 	}
-	if _, exists := tools[4].(map[string]any)["function"]; exists {
-		t.Fatalf("unrecoverable tool was invented: %#v", tools[4])
+	mixed := tools[4].(map[string]any)
+	mixedFunction := mixed["function"].(map[string]any)
+	if mixedFunction["description"] != "Mixed fields" || mixedFunction["strict"] != true || mixedFunction["parameters"].(map[string]any)["type"] != "object" {
+		t.Fatalf("mixed flat fields were not merged: %#v", mixedFunction)
+	}
+	for _, key := range []string{"name", "description", "parameters", "input_schema", "strict"} {
+		if _, exists := mixed[key]; exists {
+			t.Fatalf("mixed flat field %q remained: %#v", key, mixed)
+		}
 	}
 	if tools[5].(map[string]any)["type"] != "web_search" {
 		t.Fatalf("unrelated tool type changed: %#v", tools[5])
+	}
+}
+
+func TestNormalizeKiloAutoChatRequestRepairsMessagesAndArguments(t *testing.T) {
+	body := []byte(`{
+		"model":"kilo/kilo-auto/free",
+		"messages":[
+			{"role":"user","content":{"type":"input_text","text":"start"}},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":{"q":"x"}}}]},
+			{"role":"function","name":"lookup","content":{"result":"OK"}},
+			{"role":"function","name":"legacy","content":"42"},
+			{"role":"user","content":["continue",{"type":"vendor_text","text":"keep me"},{"type":"input_audio","input_audio":{"data":"abc","format":"wav"}}]},
+			{"role":"user","content":[{"type":"input_audio","input_audio":{"data":"abc","format":"wav"}}]}
+		]
+	}`)
+	out, stats, err := normalizeKiloAutoChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.Changed || stats.LegacyFunctionRolesNormalized != 2 || stats.ToolCallArgumentsNormalized != 1 || stats.MessageContentsNormalized != 4 || stats.ContentBlocksDropped != 2 || stats.MediaPlaceholdersInserted != 1 {
+		t.Fatalf("unexpected stats: %#v", stats)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	messages := payload["messages"].([]any)
+	firstContent := messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if firstContent["type"] != "text" || firstContent["text"] != "start" {
+		t.Fatalf("input_text was not normalized: %#v", firstContent)
+	}
+	arguments := messages[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"]
+	if arguments != `{"q":"x"}` {
+		t.Fatalf("arguments=%#v", arguments)
+	}
+	matched := messages[2].(map[string]any)
+	if matched["role"] != "tool" || matched["tool_call_id"] != "call_1" || matched["content"] != `{"result":"OK"}` {
+		t.Fatalf("matched legacy function was not converted: %#v", matched)
+	}
+	flattened := messages[3].(map[string]any)
+	if flattened["role"] != "user" || !strings.Contains(flattened["content"].(string), "Function result (legacy):\n42") {
+		t.Fatalf("unmatched legacy function was not flattened: %#v", flattened)
+	}
+	mixed := messages[4].(map[string]any)["content"].([]any)
+	if len(mixed) != 2 || mixed[0].(map[string]any)["text"] != "continue" || mixed[1].(map[string]any)["text"] != "keep me" {
+		t.Fatalf("mixed content was not normalized: %#v", mixed)
+	}
+	placeholder := messages[5].(map[string]any)["content"].([]any)
+	if len(placeholder) != 1 || placeholder[0].(map[string]any)["text"] != "[unsupported media omitted]" {
+		t.Fatalf("media-only content was not replaced: %#v", placeholder)
+	}
+}
+
+func TestNormalizeKiloAutoChatRequestPreservesStandardContentAndConvertsImages(t *testing.T) {
+	standard := []byte(`{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}},{"type":"file","file":{"filename":"a.txt","file_data":"data:text/plain;base64,YQ=="}}]}]}`)
+	standardOut, standardStats, err := normalizeKiloAutoChatRequest(standard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if standardStats.Changed || string(standardOut) != string(standard) {
+		t.Fatalf("standard content changed: stats=%#v body=%s", standardStats, standardOut)
+	}
+
+	dirty := []byte(`{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,AA"},{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"BB"}}]}]}`)
+	dirtyOut, dirtyStats, err := normalizeKiloAutoChatRequest(dirty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirtyStats.Changed || dirtyStats.MessageContentsNormalized != 1 {
+		t.Fatalf("dirty images were not normalized: %#v", dirtyStats)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(dirtyOut, &payload); err != nil {
+		t.Fatal(err)
+	}
+	content := payload["messages"].([]any)[0].(map[string]any)["content"].([]any)
+	if content[0].(map[string]any)["image_url"].(map[string]any)["url"] != "data:image/png;base64,AA" || content[1].(map[string]any)["image_url"].(map[string]any)["url"] != "data:image/webp;base64,BB" {
+		t.Fatalf("images=%#v", content)
+	}
+}
+
+func TestNormalizeKiloAutoChatRequestDropsOnlyOptionalUnnamedTools(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		wantDropped int
+		wantTools   bool
+	}{
+		{name: "default optional", body: `{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}]}`, wantDropped: 1},
+		{name: "auto optional", body: `{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"tool_choice":"auto"}`, wantDropped: 1},
+		{name: "none optional", body: `{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"tool_choice":"none"}`, wantDropped: 1},
+		{name: "required remains", body: `{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"tool_choice":"required"}`, wantTools: true},
+		{name: "forced remains", body: `{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function"}],"tool_choice":{"type":"function","function":{"name":"lookup"}}}`, wantTools: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, stats, err := normalizeKiloAutoChatRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.OptionalToolsDropped != tc.wantDropped || stats.UnrecoverableTools != 1 {
+				t.Fatalf("stats=%#v", stats)
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(out, &payload); err != nil {
+				t.Fatal(err)
+			}
+			_, hasTools := payload["tools"]
+			if hasTools != tc.wantTools {
+				t.Fatalf("hasTools=%t want=%t payload=%#v", hasTools, tc.wantTools, payload)
+			}
+			if !tc.wantTools {
+				if _, exists := payload["tool_choice"]; exists {
+					t.Fatalf("optional tool_choice remained: %#v", payload)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeKiloAutoChatRequestRepairsSafeToolSchemaVariants(t *testing.T) {
+	body := []byte(`{"model":"kilo/kilo-auto/free","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"empty","parameters":[]}},{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":[],"required":"q"}}},{"type":"function","name":"invalid","parameters":"not-a-schema"}]}`)
+	out, stats, err := normalizeKiloAutoChatRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.ToolSchemasRepaired != 2 {
+		t.Fatalf("stats=%#v", stats)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	tools := payload["tools"].([]any)
+	empty := tools[0].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+	lookup := tools[1].(map[string]any)["function"].(map[string]any)["parameters"].(map[string]any)
+	invalid := tools[2].(map[string]any)["function"].(map[string]any)["parameters"]
+	if empty["type"] != "object" || len(empty["properties"].(map[string]any)) != 0 || len(empty["required"].([]any)) != 0 {
+		t.Fatalf("empty schema=%#v", empty)
+	}
+	if len(lookup["properties"].(map[string]any)) != 0 || len(lookup["required"].([]any)) != 1 || lookup["required"].([]any)[0] != "q" {
+		t.Fatalf("lookup schema=%#v", lookup)
+	}
+	if invalid != "not-a-schema" {
+		t.Fatalf("non-empty malformed schema was guessed instead of preserved: %#v", invalid)
 	}
 }
 
@@ -243,6 +399,67 @@ func TestKiloAutoRequestCompatHandlerRepairsThreeObservedShapes(t *testing.T) {
 	}
 }
 
+func TestKiloAutoRequestCompatHandlerRepairsSecondBatchShapes(t *testing.T) {
+	var call map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(body, &call); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jsonCompatTestCompletion(t, kiloAutoFreeModel, "OK"))
+	}))
+	defer upstream.Close()
+
+	handler := NewHandler(Config{
+		UpstreamBaseURL:              upstream.URL,
+		HTTPClient:                   upstream.Client(),
+		RequestLogDir:                t.TempDir(),
+		KiloAutoReliabilityEnabled:   true,
+		KiloAutoRequestCompatEnabled: true,
+	})
+	rec := postJSON(t, handler, "/v1/chat/completions", `{
+		"model":"kilo/kilo-auto/free",
+		"messages":[
+			{"role":"user","content":{"type":"input_text","text":"use lookup"}},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":{"q":"x"}}}]},
+			{"role":"function","name":"lookup","content":{"result":"OK"}},
+			{"role":"user","content":[{"type":"vendor_text","text":"continue"},{"type":"input_audio","input_audio":{"data":"abc","format":"wav"}}]}
+		],
+		"tools":[
+			{"type":"function"},
+			{"type":"function","function":{"name":"lookup","parameters":{"type":"object","properties":[],"required":"q"}}}
+		],
+		"tool_choice":"auto"
+	}`)
+	if rec.Code != http.StatusOK || lingJSONTestResponseContent(t, rec.Body.Bytes()) != "OK" {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	messages := call["messages"].([]any)
+	if messages[0].(map[string]any)["content"].([]any)[0].(map[string]any)["text"] != "use lookup" {
+		t.Fatalf("input content=%#v", messages[0])
+	}
+	arguments := messages[1].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["arguments"]
+	if arguments != `{"q":"x"}` {
+		t.Fatalf("arguments=%#v", arguments)
+	}
+	result := messages[2].(map[string]any)
+	if result["role"] != "tool" || result["tool_call_id"] != "call_1" || result["content"] != `{"result":"OK"}` {
+		t.Fatalf("legacy result=%#v", result)
+	}
+	content := messages[3].(map[string]any)["content"].([]any)
+	if len(content) != 1 || content[0].(map[string]any)["text"] != "continue" {
+		t.Fatalf("normalized content=%#v", content)
+	}
+	tools := call["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["function"].(map[string]any)["name"] != "lookup" {
+		t.Fatalf("tools=%#v", tools)
+	}
+}
+
 func TestKiloAutoRequestCompatFeedsNormalizedMessagesIntoReliabilityRepair(t *testing.T) {
 	var calls []map[string]any
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +536,13 @@ func TestClassifyKiloAutoUpstream400(t *testing.T) {
 		{name: "empty user", body: `{"error":{"code":"invalid_request_error","message":"user message must have content","param":"messages.3.content"}}`, wantCategory: "empty_user_content", wantParameter: "message_content"},
 		{name: "paid auth", body: `{"error":{"code":"PAID_MODEL_AUTH_REQUIRED","message":"sign in"},"error_type":"paid_model_auth_required"}`, wantCategory: "paid_model_auth_required", wantParameter: "none"},
 		{name: "tool parameters", body: `{"error":{"code":"invalid_request_error","message":"bad schema","param":"tools.2.function.parameters"}}`, wantCategory: "invalid_tool_schema", wantParameter: "tool_parameters"},
+		{name: "tool arguments", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"messages.1.tool_calls.0.function.arguments"}}`, wantCategory: "invalid_tool_arguments", wantParameter: "tool_arguments"},
+		{name: "message role", body: `{"error":{"code":"invalid_request_error","message":"Invalid request","param":"messages.1.role"}}`, wantCategory: "invalid_message_role", wantParameter: "message_role"},
+		{name: "message content", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"messages.1.content"}}`, wantCategory: "invalid_message_content", wantParameter: "message_content"},
+		{name: "tool choice", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"tool_choice"}}`, wantCategory: "invalid_tool_choice", wantParameter: "tool_choice"},
+		{name: "sampling", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"temperature"}}`, wantCategory: "invalid_sampling_parameter", wantParameter: "sampling_parameter"},
+		{name: "output limit", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"max_tokens"}}`, wantCategory: "invalid_output_limit", wantParameter: "output_limit"},
+		{name: "stop", body: `{"error":{"code":"invalid_request_error","message":"Invalid input","param":"stop"}}`, wantCategory: "invalid_stop", wantParameter: "stop"},
 		{name: "response format", body: `{"error":{"code":"invalid_request_error","message":"bad schema","param":"response_format.json_schema"}}`, wantCategory: "invalid_response_format", wantParameter: "response_format"},
 		{name: "non json", body: `bad gateway`, wantCategory: "non_json", wantParameter: "none"},
 	}
