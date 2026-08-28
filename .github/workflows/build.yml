@@ -5,12 +5,17 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Optional commit-specific prerelease tag
+        required: false
+        type: string
 
 jobs:
   test-and-build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,9 +45,33 @@ jobs:
           go build -trimpath -ldflags="-s -w" -o dist/kilo-newapi-adapter ./cmd/kilo-newapi-adapter
 
       - name: Upload binary
+        if: github.event_name != 'workflow_dispatch' || inputs.release_tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: kilo-newapi-adapter-linux-amd64
           path: dist/kilo-newapi-adapter
           if-no-files-found: error
           retention-days: 14
+
+      - name: Generate checksum
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        run: sha256sum dist/kilo-newapi-adapter > dist/SHA256SUMS
+
+      - name: Create commit-specific prerelease
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "release already exists: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" \
+            dist/kilo-newapi-adapter \
+            dist/SHA256SUMS \
+            --target "$GITHUB_SHA" \
+            --title "Kilo NewAPI adapter $GITHUB_SHA" \
+            --notes "Commit-specific CI prerelease for production verification." \
+            --prerelease
