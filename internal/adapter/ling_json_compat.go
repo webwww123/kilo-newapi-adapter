@@ -24,6 +24,8 @@ const (
 	kiloAutoJSONPublicModel          = publicModelPrefix + kiloAutoFreeModel
 	nemotronUltraFreeModel           = "nvidia/nemotron-3-ultra-550b-a55b:free"
 	nemotronUltraJSONPublicModel     = publicModelPrefix + nemotronUltraFreeModel
+	nemotronSuperFreeModel           = "nvidia/nemotron-3-super-120b-a12b:free"
+	nemotronSuperJSONPublicModel     = publicModelPrefix + nemotronSuperFreeModel
 	nemotronLightningFreeModel       = "nvidia/nemotron-3.5-lightning:free"
 	nemotronLightningJSONPublicModel = publicModelPrefix + nemotronLightningFreeModel
 	tencentHY3FreeModel              = "tencent/hy3:free"
@@ -170,7 +172,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		h.base.ServeHTTP(recorder, attemptRequest)
 		status := recorder.Status()
 		if status < http.StatusOK || status >= http.StatusMultipleChoices {
-			if attempt == 1 && spec.Profile == "nemotron_ultra" && (status == http.StatusBadRequest || status == http.StatusInternalServerError) {
+			if attempt == 1 && (spec.Profile == "nemotron_ultra" || spec.Profile == "nemotron_super") && (status == http.StatusBadRequest || status == http.StatusInternalServerError) {
 				stats.UpstreamErrorRetry = true
 				repairCandidate = ""
 				continue
@@ -456,6 +458,8 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "kilo_auto", kiloAutoJSONPublicModel, true
 	case nemotronUltraJSONPublicModel, nemotronUltraFreeModel:
 		return "nemotron_ultra", nemotronUltraJSONPublicModel, true
+	case nemotronSuperJSONPublicModel, nemotronSuperFreeModel:
+		return "nemotron_super", nemotronSuperJSONPublicModel, true
 	case nemotronLightningJSONPublicModel, nemotronLightningFreeModel:
 		return "nemotron_lightning", nemotronLightningJSONPublicModel, true
 	case tencentHY3JSONPublicModel, tencentHY3FreeModel:

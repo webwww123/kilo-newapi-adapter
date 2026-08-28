@@ -487,6 +487,8 @@ func TestKiloAutoAndNemotronJSONCompatRepairWithoutForwardingFormat(t *testing.T
 		{name: "auto_schema_stream", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel, format: schemaFormat, stream: true, repairFloor: kiloAutoJSONRepairOutputFloor},
 		{name: "ultra_object_stream", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
 		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "super_object_stream", publicModel: nemotronSuperJSONPublicModel, upstreamModel: nemotronSuperFreeModel, format: `{"type":"json_object"}`, stream: true, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "super_schema", publicModel: nemotronSuperJSONPublicModel, upstreamModel: nemotronSuperFreeModel, format: schemaFormat, repairFloor: lingJSONRepairOutputFloor},
 		{name: "lightning_object", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: `{"type":"json_object"}`, repairFloor: lingJSONRepairOutputFloor},
 		{name: "lightning_schema_stream", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: schemaFormat, stream: true, repairFloor: lingJSONRepairOutputFloor},
 	}
@@ -694,6 +696,7 @@ func TestKiloAutoAndNemotronOrdinaryToolsRemainPassthrough(t *testing.T) {
 	}{
 		{name: "auto", publicModel: kiloAutoJSONPublicModel, upstreamModel: kiloAutoFreeModel},
 		{name: "ultra", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel},
+		{name: "super", publicModel: nemotronSuperJSONPublicModel, upstreamModel: nemotronSuperFreeModel},
 		{name: "lightning", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel},
 	}
 	for _, tc := range tests {
