@@ -27,20 +27,21 @@ type requestLogger struct {
 }
 
 type requestLogEntry struct {
-	Timestamp     string          `json:"timestamp"`
-	Method        string          `json:"method"`
-	Path          string          `json:"path"`
-	Query         string          `json:"query,omitempty"`
-	UpstreamPath  string          `json:"upstream_path,omitempty"`
-	Status        int             `json:"status"`
-	DurationMS    int64           `json:"duration_ms"`
-	BytesWritten  int64           `json:"bytes_written"`
-	RemoteAddr    string          `json:"remote_addr,omitempty"`
-	UserAgent     string          `json:"user_agent,omitempty"`
-	Request       requestLogBody  `json:"request"`
-	Response      responseLogBody `json:"response"`
-	AdapterError  string          `json:"adapter_error,omitempty"`
-	UpstreamError string          `json:"upstream_error,omitempty"`
+	ProviderRoutingErrorEvents int             `json:"provider_routing_error_events,omitempty"`
+	Timestamp                  string          `json:"timestamp"`
+	Method                     string          `json:"method"`
+	Path                       string          `json:"path"`
+	Query                      string          `json:"query,omitempty"`
+	UpstreamPath               string          `json:"upstream_path,omitempty"`
+	Status                     int             `json:"status"`
+	DurationMS                 int64           `json:"duration_ms"`
+	BytesWritten               int64           `json:"bytes_written"`
+	RemoteAddr                 string          `json:"remote_addr,omitempty"`
+	UserAgent                  string          `json:"user_agent,omitempty"`
+	Request                    requestLogBody  `json:"request"`
+	Response                   responseLogBody `json:"response"`
+	AdapterError               string          `json:"adapter_error,omitempty"`
+	UpstreamError              string          `json:"upstream_error,omitempty"`
 }
 
 type requestLogBody struct {
@@ -70,14 +71,15 @@ type loggableRequest struct {
 }
 
 type loggableResponse struct {
-	Status        int
-	Duration      time.Duration
-	BytesWritten  int64
-	ContentType   string
-	Body          []byte
-	Truncated     bool
-	AdapterError  string
-	UpstreamError string
+	ProviderRoutingErrorEvents int
+	Status                     int
+	Duration                   time.Duration
+	BytesWritten               int64
+	ContentType                string
+	Body                       []byte
+	Truncated                  bool
+	AdapterError               string
+	UpstreamError              string
 }
 
 func newRequestLogger(cfg RequestLogConfig) *requestLogger {
@@ -102,18 +104,19 @@ func (l *requestLogger) record(req loggableRequest, resp loggableResponse) error
 	}
 	now := l.cfg.now()
 	entry := requestLogEntry{
-		Timestamp:     now.Format(time.RFC3339Nano),
-		Method:        req.Method,
-		Path:          req.Path,
-		Query:         req.Query,
-		UpstreamPath:  req.UpstreamPath,
-		Status:        resp.Status,
-		DurationMS:    resp.Duration.Milliseconds(),
-		BytesWritten:  resp.BytesWritten,
-		RemoteAddr:    req.RemoteAddr,
-		UserAgent:     req.UserAgent,
-		AdapterError:  resp.AdapterError,
-		UpstreamError: resp.UpstreamError,
+		ProviderRoutingErrorEvents: resp.ProviderRoutingErrorEvents,
+		Timestamp:                  now.Format(time.RFC3339Nano),
+		Method:                     req.Method,
+		Path:                       req.Path,
+		Query:                      req.Query,
+		UpstreamPath:               req.UpstreamPath,
+		Status:                     resp.Status,
+		DurationMS:                 resp.Duration.Milliseconds(),
+		BytesWritten:               resp.BytesWritten,
+		RemoteAddr:                 req.RemoteAddr,
+		UserAgent:                  req.UserAgent,
+		AdapterError:               resp.AdapterError,
+		UpstreamError:              resp.UpstreamError,
 		Request: requestLogBody{
 			ContentType: req.ContentType,
 			Model:       extractModel(req.Body),

@@ -396,9 +396,11 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	logCapture := newCaptureBuffer(h.cfg.RequestLogBodyLimit)
 	w.Header().Del("Content-Length")
 	responseStatus := resp.StatusCode
+	providerRoutingErrorEvents := 0
 	if isEventStreamResponse(resp.Header) {
 		w.WriteHeader(responseStatus)
 		audit := copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath)
+		providerRoutingErrorEvents = audit.ProviderRoutingErrorEvents
 		if audit.HadError {
 			responseStatus = http.StatusInternalServerError
 		}
@@ -426,6 +428,10 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 			return
 		}
 		rawResponseBody := responseBody
+		var rawPayload any
+		if json.Unmarshal(rawResponseBody, &rawPayload) == nil && successPayloadHasProviderRoutingError(rawPayload) {
+			providerRoutingErrorEvents = 1
+		}
 		var validSuccess bool
 		responseBody, validSuccess = normalizeSuccessResponseBodyChecked(responseBody, publicRequestModel, upstreamPath, false)
 		if !validSuccess {
@@ -441,22 +447,24 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		}
 	}
 	h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
-		status:        responseStatus,
-		bytesWritten:  logCapture.Total(),
-		contentType:   resp.Header.Get("Content-Type"),
-		body:          logCapture.Bytes(),
-		bodyTruncated: logCapture.Truncated(),
+		status:                     responseStatus,
+		providerRoutingErrorEvents: providerRoutingErrorEvents,
+		bytesWritten:               logCapture.Total(),
+		contentType:                resp.Header.Get("Content-Type"),
+		body:                       logCapture.Bytes(),
+		bodyTruncated:              logCapture.Truncated(),
 	})
 }
 
 type responseLogCapture struct {
-	status        int
-	bytesWritten  int64
-	contentType   string
-	body          []byte
-	bodyTruncated bool
-	adapterError  string
-	upstreamError string
+	providerRoutingErrorEvents int
+	status                     int
+	bytesWritten               int64
+	contentType                string
+	body                       []byte
+	bodyTruncated              bool
+	adapterError               string
+	upstreamError              string
 }
 
 func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath string, body []byte, resp responseLogCapture) {
@@ -479,14 +487,15 @@ func (h *Handler) recordRequest(start time.Time, r *http.Request, upstreamPath s
 		ContentType:  r.Header.Get("Content-Type"),
 		Body:         body,
 	}, loggableResponse{
-		Status:        resp.status,
-		Duration:      time.Since(start),
-		BytesWritten:  resp.bytesWritten,
-		ContentType:   resp.contentType,
-		Body:          resp.body,
-		Truncated:     resp.bodyTruncated,
-		AdapterError:  resp.adapterError,
-		UpstreamError: resp.upstreamError,
+		ProviderRoutingErrorEvents: resp.providerRoutingErrorEvents,
+		Status:                     resp.status,
+		Duration:                   time.Since(start),
+		BytesWritten:               resp.bytesWritten,
+		ContentType:                resp.contentType,
+		Body:                       resp.body,
+		Truncated:                  resp.bodyTruncated,
+		AdapterError:               resp.adapterError,
+		UpstreamError:              resp.upstreamError,
 	})
 	if err != nil {
 		fmt.Printf("request_log_error=%v\n", err)
@@ -694,7 +703,8 @@ func successPayloadHasError(value any) bool {
 			if normalizedKey == "error" && meaningfulErrorValue(item) {
 				return true
 			}
-			if isOpaqueSuccessField(normalizedKey) {
+			// Provider routing diagnostics can contain failed attempts alongside a successful result.
+			if normalizedKey == "providermetadata" || isOpaqueSuccessField(normalizedKey) {
 				continue
 			}
 			if successPayloadHasError(item) {
@@ -704,6 +714,32 @@ func successPayloadHasError(value any) bool {
 	case []any:
 		for _, item := range typed {
 			if successPayloadHasError(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Count affected JSON/SSE events separately; repeated metadata is not a count of unique upstream attempts.
+func successPayloadHasProviderRoutingError(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			normalizedKey := normalizeSuccessFieldName(key)
+			if normalizedKey == "providermetadata" {
+				if successPayloadHasError(item) {
+					return true
+				}
+				continue
+			}
+			if !isOpaqueSuccessField(normalizedKey) && successPayloadHasProviderRoutingError(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if successPayloadHasProviderRoutingError(item) {
 				return true
 			}
 		}
@@ -863,14 +899,15 @@ func isEventStreamResponse(header http.Header) bool {
 }
 
 type eventStreamAudit struct {
-	HadError         bool
-	Events           int
-	ParseErrors      int
-	ErrorEvents      int
-	VisibleDeltas    int
-	ToolDeltas       int
-	CompletionTokens int64
-	Done             bool
+	ProviderRoutingErrorEvents int
+	HadError                   bool
+	Events                     int
+	ParseErrors                int
+	ErrorEvents                int
+	VisibleDeltas              int
+	ToolDeltas                 int
+	CompletionTokens           int64
+	Done                       bool
 }
 
 func (a eventStreamAudit) SuspectedSoftError() bool {
@@ -926,6 +963,9 @@ func (a *eventStreamAudit) observe(line []byte) {
 	}
 	if successPayloadHasError(payload) {
 		a.ErrorEvents++
+	}
+	if successPayloadHasProviderRoutingError(payload) {
+		a.ProviderRoutingErrorEvents++
 	}
 	if usage, ok := payload["usage"].(map[string]any); ok {
 		for _, key := range []string{"completion_tokens", "output_tokens"} {
