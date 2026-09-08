@@ -1585,3 +1585,9 @@ func (w *loggingResponseWriter) Write(data []byte) (int, error) {
 	*w.bytesWritten += int64(n)
 	return n, err
 }
+
+func (w *loggingResponseWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
