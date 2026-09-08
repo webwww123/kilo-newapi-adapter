@@ -130,6 +130,11 @@ tool result; pending or ambiguous calls, malformed non-empty argument strings,
 other models, and other protocols remain unchanged. Only normalization counts
 are logged.
 
+Inkling Messages additionally fills an absent historical thinking-block
+signature with an empty string before a later user turn. Thinking text and
+existing opaque signatures are preserved. A direct probe confirmed removal of
+the signature validation error; upstream rate limits still apply independently.
+
 For ordinary Auto streaming, the adapter holds at most the first 1 MiB until visible content or a tool-call delta appears. It then commits immediately and never retries after meaningful data is emitted. If the stream ends or the prelude exceeds the bound before meaningful data, the first attempt is discarded and repaired once; a second empty/overflowing attempt becomes the generic public 500. Policy/error events are not retried. Structured JSON streaming keeps using the separate validated JSON compatibility path described above.
 
 Before public error normalization, Auto Chat retries pre-header transport failures and raw upstream HTTP 429/502/503/504 only. The shared request budget allows at most two raw retries with 1-second and 3-second backoff plus jitter, honors `Retry-After` within a 15-second total wait budget, and is shared with the semantic repair attempt. HTTP 400/413/450/451 and raw 500 are never retried. The combined worst case is four upstream calls for one client request; ordinary successful requests still use one.

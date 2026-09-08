@@ -7,8 +7,9 @@ import (
 )
 
 type toolHistoryCompatStats struct {
-	EmptyArguments  int
-	ObjectArguments int
+	EmptyArguments          int
+	ObjectArguments         int
+	EmptyThinkingSignatures int
 }
 
 // Kilo validates the string type even for completed historical tool calls.
@@ -16,7 +17,7 @@ type toolHistoryCompatStats struct {
 // input object. Pending calls and calls with ambiguous IDs remain untouched.
 func normalizeKiloToolHistoryRequest(body []byte, path string) ([]byte, toolHistoryCompatStats, error) {
 	var stats toolHistoryCompatStats
-	if path != "/chat/completions" {
+	if path != "/chat/completions" && path != "/messages" {
 		return body, stats, nil
 	}
 	var payload map[string]json.RawMessage
@@ -35,6 +36,9 @@ func normalizeKiloToolHistoryRequest(body []byte, path string) ([]byte, toolHist
 	var messages []map[string]json.RawMessage
 	if json.Unmarshal(payload["messages"], &messages) != nil {
 		return body, stats, nil
+	}
+	if path == "/messages" {
+		return normalizeKiloHistoricalThinkingSignature(body, payload, messages, strings.TrimPrefix(model, publicModelPrefix))
 	}
 	callCounts := make(map[string]int)
 	resultCounts := make(map[string]int)
@@ -118,4 +122,61 @@ func toolHistoryString(raw json.RawMessage) string {
 	var value string
 	_ = json.Unmarshal(raw, &value)
 	return value
+}
+
+// Inkling's Messages schema requires a string signature even for unsigned
+// historical thinking. Preserve all existing signatures and the thinking text.
+func normalizeKiloHistoricalThinkingSignature(body []byte, payload map[string]json.RawMessage, messages []map[string]json.RawMessage, model string) ([]byte, toolHistoryCompatStats, error) {
+	var stats toolHistoryCompatStats
+	if model != thinkingMachinesInklingFreeModel && model != thinkingMachinesInklingSmallFreeModel {
+		return body, stats, nil
+	}
+	lastUser := -1
+	for i, message := range messages {
+		if toolHistoryString(message["role"]) == "user" {
+			lastUser = i
+		}
+	}
+	for i, message := range messages {
+		if i >= lastUser || toolHistoryString(message["role"]) != "assistant" {
+			continue
+		}
+		var blocks []map[string]json.RawMessage
+		if json.Unmarshal(message["content"], &blocks) != nil {
+			continue
+		}
+		changed := false
+		for _, block := range blocks {
+			if toolHistoryString(block["type"]) != "thinking" {
+				continue
+			}
+			if _, exists := block["signature"]; exists {
+				continue
+			}
+			var thinking string
+			if json.Unmarshal(block["thinking"], &thinking) != nil {
+				continue
+			}
+			block["signature"] = json.RawMessage(`""`)
+			stats.EmptyThinkingSignatures++
+			changed = true
+		}
+		if changed {
+			encoded, err := json.Marshal(blocks)
+			if err != nil {
+				return body, toolHistoryCompatStats{}, err
+			}
+			message["content"] = encoded
+		}
+	}
+	if stats.EmptyThinkingSignatures == 0 {
+		return body, stats, nil
+	}
+	encoded, err := json.Marshal(messages)
+	if err != nil {
+		return body, toolHistoryCompatStats{}, err
+	}
+	payload["messages"] = encoded
+	out, err := json.Marshal(payload)
+	return out, stats, err
 }

@@ -124,3 +124,27 @@ func TestKiloCompletedToolHistoryReachesUpstreamWithStringArguments(t *testing.T
 		t.Fatalf("status=%d attempts=%d", recorder.Code, attempts)
 	}
 }
+
+func TestKiloInklingHistoricalThinkingMissingSignature(t *testing.T) {
+	body := []byte(`{"model":"kilo/thinkingmachines/inkling:free","messages":[{"role":"user","content":"Check status."},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier status was checked."},{"type":"thinking","thinking":"Signed history.","signature":"opaque-existing"},{"type":"text","text":"OK"}]},{"role":"user","content":"Continue."}]}`)
+	out, stats, err := normalizeKiloToolHistoryRequest(body, "/messages")
+	if err != nil || stats.EmptyThinkingSignatures != 1 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	if !bytes.Contains(out, []byte(`"signature":""`)) || !bytes.Contains(out, []byte(`"signature":"opaque-existing"`)) || !bytes.Contains(out, []byte(`Earlier status was checked.`)) {
+		t.Fatal("signature placeholder missing or historical information changed")
+	}
+	for _, variant := range [][]byte{
+		bytes.ReplaceAll(body, []byte("thinkingmachines/inkling:free"), []byte("stepfun/step-3.7-flash:free")),
+		bytes.Replace(body, []byte(`,{"role":"user","content":"Continue."}`), nil, 1),
+	} {
+		result, unchanged, err := normalizeKiloToolHistoryRequest(variant, "/messages")
+		if err != nil || !bytes.Equal(result, variant) || unchanged != (toolHistoryCompatStats{}) {
+			t.Fatal("unrelated model or active thinking changed")
+		}
+	}
+	again, unchanged, err := normalizeKiloToolHistoryRequest(out, "/messages")
+	if err != nil || !bytes.Equal(again, out) || unchanged != (toolHistoryCompatStats{}) {
+		t.Fatal("signature normalization is not idempotent")
+	}
+}
