@@ -120,6 +120,16 @@ When `KILO_AUTO_RELIABILITY_ENABLED=true`, ordinary OpenAI Chat requests for `ki
 
 When `KILO_AUTO_REQUEST_COMPAT_ENABLED=true`, OpenAI Chat requests for the exact Kilo Auto free model receive conservative dirty-payload repairs before JSON validation, reliability attempts, and upstream forwarding. The adapter wraps recoverable flat function tools, repairs harmless empty Schema variants, serializes structured tool-call arguments, drops unnamed tools only when tool use is optional, converts legacy `role:function` results, normalizes object/legacy content blocks, removes unsupported audio/video blocks while preserving text, removes trailing empty user placeholders only after a completed tool turn, and promotes recognizable flattened `json_schema` roots. Standard text/image/file blocks remain unchanged. Forced or required unnamed tools, genuinely empty user requests, and non-empty malformed Schemas still fail closed. Non-empty argument strings are left unchanged rather than guessed, so their final acceptance remains upstream-dependent. Structural logs contain only repair counts and sanitized error classes; request bodies, tool names/arguments, headers, and credentials are never logged by this feature. The default is `false`.
 
+Chat requests for Step 3.7 Flash, Kilo Auto free, and Inkling free also normalize
+completed historical function calls at the forwarding boundary. Missing/null
+arguments become an explicit empty string, and object arguments become their
+JSON string representation with numeric precision retained. This fixes the
+observed Kilo string-type rejection without inventing tool input values. It does
+not depend on the Auto feature flag. Calls must have a unique matching later
+tool result; pending or ambiguous calls, malformed non-empty argument strings,
+other models, and other protocols remain unchanged. Only normalization counts
+are logged.
+
 For ordinary Auto streaming, the adapter holds at most the first 1 MiB until visible content or a tool-call delta appears. It then commits immediately and never retries after meaningful data is emitted. If the stream ends or the prelude exceeds the bound before meaningful data, the first attempt is discarded and repaired once; a second empty/overflowing attempt becomes the generic public 500. Policy/error events are not retried. Structured JSON streaming keeps using the separate validated JSON compatibility path described above.
 
 Before public error normalization, Auto Chat retries pre-header transport failures and raw upstream HTTP 429/502/503/504 only. The shared request budget allows at most two raw retries with 1-second and 3-second backoff plus jitter, honors `Retry-After` within a 15-second total wait budget, and is shared with the semantic repair attempt. HTTP 400/413/450/451 and raw 500 are never retried. The combined worst case is four upstream calls for one client request; ordinary successful requests still use one.

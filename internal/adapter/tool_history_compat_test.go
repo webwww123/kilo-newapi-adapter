@@ -1,0 +1,126 @@
+package adapter
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func toolHistoryFixture(arguments string, completed bool) []byte {
+	field := ""
+	if arguments != "" {
+		field = `,"arguments":` + arguments
+	}
+	result := ""
+	if completed {
+		result = `,{"role":"tool","tool_call_id":"call_fixture","content":"completed"},{"role":"user","content":"Summarize the result."}`
+	}
+	return []byte(fmt.Sprintf(`{"model":"kilo/stepfun/step-3.7-flash:free","metadata":{"large":9007199254740993},"messages":[{"role":"user","content":"Check status."},{"role":"assistant","content":null,"tool_calls":[{"id":"call_fixture","type":"function","function":{"name":"check"%s}}]}%s]}`, field, result))
+}
+
+func TestKiloCompletedToolHistoryArguments(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		input         string
+		want          string
+		empty, object int
+	}{
+		{"missing", "", "", 1, 0},
+		{"null", "null", "", 1, 0},
+		{"object", `{"id":9007199254740993,"path":"C:\\work"}`, `{"id":9007199254740993,"path":"C:\\work"}`, 0, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			out, stats, err := normalizeKiloToolHistoryRequest(toolHistoryFixture(tt.input, true), "/chat/completions")
+			if err != nil || stats.EmptyArguments != tt.empty || stats.ObjectArguments != tt.object {
+				t.Fatalf("stats=%+v err=%v", stats, err)
+			}
+			var payload struct {
+				Metadata map[string]json.RawMessage `json:"metadata"`
+				Messages []struct {
+					ToolCalls []struct {
+						Function map[string]json.RawMessage `json:"function"`
+					} `json:"tool_calls"`
+					Content json.RawMessage `json:"content"`
+				} `json:"messages"`
+			}
+			if err := json.Unmarshal(out, &payload); err != nil {
+				t.Fatal(err)
+			}
+			arguments, exists := payload.Messages[1].ToolCalls[0].Function["arguments"]
+			if !exists || toolHistoryString(arguments) != tt.want {
+				t.Fatalf("wrong argument representation: %s", arguments)
+			}
+			if string(payload.Metadata["large"]) != "9007199254740993" || string(payload.Messages[1].Content) != "null" || len(payload.Messages) != 4 {
+				t.Fatal("unrelated request information changed")
+			}
+			again, againStats, err := normalizeKiloToolHistoryRequest(out, "/chat/completions")
+			if err != nil || !bytes.Equal(again, out) || againStats != (toolHistoryCompatStats{}) {
+				t.Fatal("normalization is not idempotent")
+			}
+		})
+	}
+}
+
+func TestKiloToolHistoryLeavesUnsupportedOrAmbiguousInputsUntouched(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"pending":           toolHistoryFixture("", false),
+		"valid_string":      toolHistoryFixture(`"{\"name\":\"sample\"}"`, true),
+		"invalid_string":    toolHistoryFixture(`"{broken"`, true),
+		"array":             toolHistoryFixture(`[]`, true),
+		"other_model":       bytes.ReplaceAll(toolHistoryFixture("", true), []byte("stepfun/step-3.7-flash:free"), []byte("unrelated/model")),
+		"mismatched_result": bytes.Replace(toolHistoryFixture("", true), []byte(`"tool_call_id":"call_fixture"`), []byte(`"tool_call_id":"other"`), 1),
+		"duplicate_result":  bytes.Replace(toolHistoryFixture("", true), []byte(`{"role":"user","content":"Summarize the result."}`), []byte(`{"role":"tool","tool_call_id":"call_fixture","content":"duplicate"}`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			out, stats, err := normalizeKiloToolHistoryRequest(body, "/chat/completions")
+			if err != nil || !bytes.Equal(body, out) || stats != (toolHistoryCompatStats{}) {
+				t.Fatalf("unexpected mutation: stats=%+v err=%v", stats, err)
+			}
+		})
+	}
+	body := toolHistoryFixture("", true)
+	out, _, err := normalizeKiloToolHistoryRequest(body, "/messages")
+	if err != nil || !bytes.Equal(body, out) {
+		t.Fatal("wrong protocol was changed")
+	}
+}
+
+func TestKiloCompletedToolHistoryReachesUpstreamWithStringArguments(t *testing.T) {
+	attempts := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		var payload struct {
+			Messages []struct {
+				ToolCalls []struct {
+					Function map[string]json.RawMessage `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+			w.WriteHeader(400)
+			return
+		}
+		raw, exists := payload.Messages[1].ToolCalls[0].Function["arguments"]
+		var arguments string
+		if !exists || json.Unmarshal(raw, &arguments) != nil {
+			w.WriteHeader(400)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"id":"test","object":"chat.completion","model":"stepfun/step-3.7-flash:free","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+	handler := NewHandler(Config{UpstreamBaseURL: upstream.URL, UpstreamAPIKey: "test-only", RequestLogDir: t.TempDir()})
+	recorder := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(toolHistoryFixture("", true)))
+	req.Header.Set("Content-Type", "application/json")
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != 200 || attempts != 1 || !strings.Contains(recorder.Body.String(), `"content":"OK"`) {
+		t.Fatalf("status=%d attempts=%d", recorder.Code, attempts)
+	}
+}
