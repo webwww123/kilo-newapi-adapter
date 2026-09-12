@@ -59,6 +59,7 @@ REQUEST_LOG_RETENTION=48h
 REQUEST_LOG_BODY_LIMIT=1048576
 KILO_AUTO_RELIABILITY_ENABLED=false
 KILO_AUTO_REQUEST_COMPAT_ENABLED=false
+KILO_AUTO_TELEMETRY_ENABLED=false
 ```
 
 `KILO_API_KEY` is optional. It is not needed for the tested free models. Client `Authorization`, `Cookie`, and upstream override headers are stripped before forwarding to Kilo.
@@ -140,6 +141,39 @@ For ordinary Auto streaming, the adapter holds at most the first 1 MiB until vis
 Before public error normalization, Auto Chat retries pre-header transport failures and raw upstream HTTP 429/502/503/504 only. The shared request budget allows at most two raw retries with 1-second and 3-second backoff plus jitter, honors `Retry-After` within a 15-second total wait budget, and is shared with the semantic repair attempt. HTTP 400/413/450/451 and raw 500 are never retried. The combined worst case is four upstream calls for one client request; ordinary successful requests still use one.
 
 Body-free structural journal records use `kilo_auto_reliability` for semantic decisions and `kilo_upstream_retry scope=auto` for raw transient retries. They include only stream/attempt/retry/status/timing fields and never contain prompts, candidates, reasoning text, tool arguments, headers, or credentials.
+
+### Auto model and repair telemetry (opt-in)
+
+`KILO_AUTO_TELEMETRY_ENABLED=true` adds one body-free `kilo_auto_telemetry` JSON journal
+record per Auto middleware request, across Chat, Messages and Responses. It changes
+neither routing, retries, repair controls, client errors nor public model masking.
+The default is **off**; enable only on the separately approved Auto service.
+
+The record includes an internal random trace ID, optional one-way request-ID hash,
+protocol/stream/format flags, client output limit, raw attempt statuses/timings,
+retry waits and separate visible/JSON repair results. At most eight attempts are
+retained per record; overflow is explicit. Models are read from original protocol
+envelopes before public normalization, never from internal routing candidates or
+tool/user content. Only the five reviewed Auto catalog IDs are retained; absent,
+unrecognized or conflicting models become `unknown`. New Auto models require an
+explicit allowlist update, not arbitrary upstream-string logging.
+
+`visible_complete` and `json_validated` describe adapter checks. `terminal_observed`
+means visible output and a protocol finish were observed, **not** that client tools
+executed or the task was correct. Cancellation, missing terminals, response errors
+and local `{ "result": ... }` fallback stay separate. Records may include probes and
+multiple NewAPI fallback legs; these are not site-wide logical success metrics.
+
+Summarize a bounded journal window without reading or printing request bodies:
+
+```bash
+journalctl -u <AUTO_SERVICE> --since '24 hours ago' --no-pager -o cat | python3 scripts/kilo_auto_telemetry_report.py
+```
+
+Both physical-attempt and completed-reply distributions include `unknown` in their
+denominator. Feed the window once (the summarizer does not deduplicate copied log
+lines). Existing request-log retention and body limits are unchanged; telemetry
+uses the service journal and its existing retention. Disable the flag to stop it.
 
 Request debug logs are written as JSONL files named `requests-YYYY-MM-DD.jsonl`.
 Each entry records request metadata, the model field, truncated request and response bodies, upstream status, and timing.

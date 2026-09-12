@@ -43,10 +43,14 @@ func NewHandler(cfg Config) http.Handler {
 	base := newBaseHandler(cfg)
 	jsonCompatRequestCompat := base.cfg.KiloAutoRequestCompatEnabled && !base.cfg.KiloAutoReliabilityEnabled
 	jsonCompat := newLingJSONCompatHandlerWithRequestCompat(base, base.cfg.MaxBodyBytes, jsonCompatRequestCompat)
-	if !base.cfg.KiloAutoReliabilityEnabled {
-		return jsonCompat
+	var handler http.Handler = jsonCompat
+	if base.cfg.KiloAutoReliabilityEnabled {
+		handler = newKiloAutoReliabilityHandlerWithRequestCompat(jsonCompat, base.cfg.MaxBodyBytes, base.cfg.KiloAutoRequestCompatEnabled)
 	}
-	return newKiloAutoReliabilityHandlerWithRequestCompat(jsonCompat, base.cfg.MaxBodyBytes, base.cfg.KiloAutoRequestCompatEnabled)
+	if base.cfg.KiloAutoTelemetryEnabled {
+		handler = newKiloAutoTelemetryHandler(handler)
+	}
+	return handler
 }
 
 func newBaseHandler(cfg Config) *Handler {
@@ -204,6 +208,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request, start tim
 }
 
 func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPath string, start time.Time) {
+	defer finishKiloAutoTelemetryAttempt(r.Context())
 	if r.Method != http.MethodPost {
 		writeJSONError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		h.recordRequest(start, r, upstreamPath, nil, responseLogCapture{
@@ -236,6 +241,7 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		})
 		return
 	}
+	observeKiloAutoTelemetryRequest(r, body)
 	publicRequestModel, err := validatePublicRequestModel(body)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -399,7 +405,11 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 	providerRoutingErrorEvents := 0
 	if isEventStreamResponse(resp.Header) {
 		w.WriteHeader(responseStatus)
-		audit := copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath)
+		audit := copyEventStreamWithNormalizeAndCapture(w, resp.Body, logCapture, publicRequestModel, upstreamPath, kiloAutoTelemetryObserver(r.Context()))
+		if trace := activeKiloAutoTelemetry(r.Context()); trace != nil && trace.current() != nil {
+			trace.current().ReadFailed = audit.ReadFailed
+			trace.current().ResponseError = trace.current().ResponseError || audit.HadError || audit.ParseErrors > 0
+		}
 		providerRoutingErrorEvents = audit.ProviderRoutingErrorEvents
 		if audit.HadError {
 			responseStatus = http.StatusInternalServerError
@@ -429,8 +439,15 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		}
 		rawResponseBody := responseBody
 		var rawPayload any
-		if json.Unmarshal(rawResponseBody, &rawPayload) == nil && successPayloadHasProviderRoutingError(rawPayload) {
-			providerRoutingErrorEvents = 1
+		if json.Unmarshal(rawResponseBody, &rawPayload) == nil {
+			if observe := kiloAutoTelemetryObserver(r.Context()); observe != nil {
+				if object, ok := rawPayload.(map[string]any); ok {
+					observe(object)
+				}
+			}
+			if successPayloadHasProviderRoutingError(rawPayload) {
+				providerRoutingErrorEvents = 1
+			}
 		}
 		var validSuccess bool
 		responseBody, validSuccess = normalizeSuccessResponseBodyChecked(responseBody, publicRequestModel, upstreamPath, false)
@@ -899,6 +916,7 @@ func isEventStreamResponse(header http.Header) bool {
 }
 
 type eventStreamAudit struct {
+	ReadFailed                 bool
 	ProviderRoutingErrorEvents int
 	HadError                   bool
 	Events                     int
@@ -914,14 +932,14 @@ func (a eventStreamAudit) SuspectedSoftError() bool {
 	return a.HadError || a.ErrorEvents > 0 || (a.VisibleDeltas == 0 && a.ToolDeltas == 0 && a.CompletionTokens == 0)
 }
 
-func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string) eventStreamAudit {
+func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, capture *captureBuffer, publicModel string, upstreamPath string, observers ...func(map[string]any)) eventStreamAudit {
 	flusher, _ := w.(http.Flusher)
 	reader := bufio.NewReader(r)
 	audit := eventStreamAudit{}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			audit.observe(line)
+			audit.observe(line, observers...)
 			chunk, chunkHadError := normalizeEventStreamLine(line, publicModel, upstreamPath)
 			if capture != nil {
 				if chunkHadError {
@@ -937,12 +955,13 @@ func copyEventStreamWithNormalizeAndCapture(w http.ResponseWriter, r io.Reader, 
 			}
 		}
 		if err != nil {
+			audit.ReadFailed = err != io.EOF
 			return audit
 		}
 	}
 }
 
-func (a *eventStreamAudit) observe(line []byte) {
+func (a *eventStreamAudit) observe(line []byte, observers ...func(map[string]any)) {
 	trimmed := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return
@@ -960,6 +979,11 @@ func (a *eventStreamAudit) observe(line []byte) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		a.ParseErrors++
 		return
+	}
+	for _, observe := range observers {
+		if observe != nil {
+			observe(payload)
+		}
 	}
 	if successPayloadHasError(payload) {
 		a.ErrorEvents++
@@ -1068,7 +1092,17 @@ func (h *Handler) forward(original *http.Request, upstreamPath string, body io.R
 		req.Header.Set("Authorization", "Bearer "+h.cfg.UpstreamAPIKey)
 	}
 
-	return h.cfg.HTTPClient.Do(req)
+	attempt := beginKiloAutoTelemetryAttempt(original.Context())
+	resp, requestErr := h.cfg.HTTPClient.Do(req)
+	if attempt != nil {
+		attempt.HeadersMS = time.Since(attempt.started).Milliseconds()
+		attempt.DurationMS = attempt.HeadersMS
+		attempt.TransportError = requestErr != nil
+		if resp != nil {
+			attempt.Status = resp.StatusCode
+		}
+	}
+	return resp, requestErr
 }
 
 func (h *Handler) forwardWithModelRetry(original *http.Request, upstreamPath string, body []byte, publicModel string) (*http.Response, error) {
@@ -1293,6 +1327,13 @@ func recordKiloAutoRetryProgress(state *kiloAutoRetryState, localRetries *int, l
 }
 
 func (h *Handler) waitBeforeRetry(ctx context.Context, delay time.Duration) error {
+	finishKiloAutoTelemetryAttempt(ctx)
+	started := time.Now()
+	defer func() {
+		if trace := activeKiloAutoTelemetry(ctx); trace != nil {
+			trace.record.RetryWaitMS += time.Since(started).Milliseconds()
+		}
+	}()
 	wait := h.retryWait
 	if wait == nil {
 		wait = waitForRetry

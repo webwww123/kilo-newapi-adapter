@@ -13,6 +13,14 @@ import (
 )
 
 func TestProxyDeliversStreamBeforeUpstreamCompletes(t *testing.T) {
+	testProxyDeliversStreamBeforeUpstreamCompletes(t, false)
+}
+
+func TestKiloAutoTelemetryAllProtocolsFlushBeforeUpstreamCompletes(t *testing.T) {
+	testProxyDeliversStreamBeforeUpstreamCompletes(t, true)
+}
+
+func testProxyDeliversStreamBeforeUpstreamCompletes(t *testing.T, telemetry bool) {
 	for _, tc := range []struct {
 		name, path, request, firstEvent, lastEvent, terminalMarker string
 	}{
@@ -41,7 +49,12 @@ func TestProxyDeliversStreamBeforeUpstreamCompletes(t *testing.T) {
 				_, _ = io.WriteString(w, "data: "+tc.lastEvent+"\n\n")
 			}))
 			defer upstream.Close()
-			adapter := httptest.NewServer(NewHandler(Config{UpstreamBaseURL: upstream.URL, RequestLogDir: t.TempDir()}))
+			handler := NewHandler(Config{UpstreamBaseURL: upstream.URL, RequestLogDir: t.TempDir(), KiloAutoTelemetryEnabled: telemetry})
+			if telemetry {
+				handler.(*kiloAutoTelemetryHandler).emit = func(kiloAutoTelemetryRecord) {}
+				tc.request = strings.ReplaceAll(tc.request, "kilo/public-model", "kilo/kilo-auto/free")
+			}
+			adapter := httptest.NewServer(handler)
 			defer adapter.Close()
 			defer releaseUpstream()
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

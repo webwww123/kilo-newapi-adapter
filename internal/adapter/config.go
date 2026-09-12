@@ -25,6 +25,7 @@ type Config struct {
 
 	KiloAutoReliabilityEnabled   bool
 	KiloAutoRequestCompatEnabled bool
+	KiloAutoTelemetryEnabled     bool
 	TrustedNewAPIErrors          bool
 }
 
@@ -48,6 +49,7 @@ func ConfigFromEnv() Config {
 			os.Getenv("KILO_AUTO_REQUEST_COMPAT_ENABLED"),
 			false,
 		),
+		KiloAutoTelemetryEnabled: parseBool(os.Getenv("KILO_AUTO_TELEMETRY_ENABLED"), false),
 		TrustedNewAPIErrors: parseBool(
 			os.Getenv("TRUSTED_NEWAPI_ERROR_DIAGNOSTICS"),
 			false,

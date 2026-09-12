@@ -86,6 +86,7 @@ func (h *kiloAutoReliabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 		writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
 		return
 	}
+	observeKiloAutoTelemetryRequest(r, body)
 	payload, stream, tools, autoRequest, matched := parseKiloAutoReliabilityRequest(body)
 	if !autoRequest {
 		h.next.ServeHTTP(w, r)
@@ -115,6 +116,11 @@ func (h *kiloAutoReliabilityHandler) ServeHTTP(w http.ResponseWriter, r *http.Re
 
 	stats := &kiloAutoReliabilityStats{Stream: stream, Started: time.Now()}
 	defer logKiloAutoReliability(stats)
+	defer func() {
+		if trace := activeKiloAutoTelemetry(r.Context()); trace != nil {
+			trace.record.Reliability = &kiloAutoTelemetryRepair{Used: stats.RepairUsed, FirstFailure: stats.FirstFailureClass, FinalFailure: stats.FinalFailureClass}
+		}
+	}()
 
 	firstBody := body
 	if !tools {
@@ -309,6 +315,7 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoNonStream(w http.ResponseWrite
 		return
 	}
 	stats.RepairUsed = true
+	markKiloAutoTelemetryRepair(r.Context(), "visible_repair")
 	second := newLingJSONBufferedWriter()
 	h.next.ServeHTTP(second, cloneLingJSONRequest(r, repairBody))
 	stats.Attempts = 2
@@ -603,6 +610,7 @@ func (h *kiloAutoReliabilityHandler) serveKiloAutoStream(w http.ResponseWriter, 
 		return
 	}
 	stats.RepairUsed = true
+	markKiloAutoTelemetryRepair(r.Context(), "visible_repair")
 	second := newKiloAutoStreamPreludeWriter(w, kiloAutoStreamPreludeBytes)
 	h.next.ServeHTTP(second, cloneLingJSONRequest(r, repairBody))
 	stats.Attempts = 2

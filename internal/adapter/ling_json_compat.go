@@ -128,6 +128,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		writePublicErrorResponse(w, http.StatusBadRequest, lingJSONRequestPath)
 		return
 	}
+	observeKiloAutoTelemetryRequest(r, body)
 	if h.kiloAutoRequestCompatEnabled {
 		var stats kiloAutoRequestCompatStats
 		body, stats, err = normalizeKiloAutoChatRequest(body)
@@ -154,6 +155,11 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		Started:        time.Now(),
 	}
 	defer func() { logLingJSONCompat(stats) }()
+	defer func() {
+		if trace := activeKiloAutoTelemetry(r.Context()); trace != nil {
+			trace.record.JSON = &kiloAutoTelemetryJSON{RepairUsed: stats.RepairUsed, Validated: stats.Validated, ObjectFallback: stats.ObjectFallbackUsed, ReasoningSalvaged: stats.ReasoningSalvaged, ValidationFailures: stats.ValidationFailure}
+		}
+	}()
 
 	if parseErr != nil {
 		stats.ErrorClass = "invalid_request"
@@ -179,6 +185,7 @@ func (h *lingJSONCompatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 			attemptBody, err = buildLingJSONFirstBody(payload, spec)
 		} else {
 			stats.RepairUsed = true
+			markKiloAutoTelemetryRepair(r.Context(), "json_repair")
 			attemptBody, err = buildLingJSONRepairBody(payload, spec, repairCandidate)
 		}
 		if err != nil {
