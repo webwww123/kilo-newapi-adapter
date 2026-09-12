@@ -30,6 +30,7 @@ func (s contextTrimStats) changed() bool {
 }
 
 var freeContextTrimProfiles = map[string]contextTrimProfile{
+	lingVLFreeModel:                                      {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"kilo-auto/free":                                     {ContextLimit: 256000, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"poolside/laguna-m.1:free":                           {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"stepfun/step-3.7-flash:free":                        {ContextLimit: 262144, SafetyMargin: 0, MaxInputTokens: 220000},

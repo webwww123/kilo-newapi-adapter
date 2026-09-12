@@ -73,6 +73,14 @@ KILO_AUTO_REQUEST_COMPAT_ENABLED=false
 
 ## Free Model Context Trimming
 
+`kilo/inclusionai/ling-3.0-flash-vl:free` uses a 262144-token context profile,
+40000-token headroom and a 200000-token input budget. It preserves native image
+parts, complete tool turns and caller output limits. The paid VL model is unchanged.
+Chat `json_object` and `json_schema` use local validation with at most one repair;
+native `response_format` is omitted on both upstream attempts because VL rejects it.
+Structured streams are buffered until validated. Tools combined with a structured
+format return an explicit error; ordinary tool and image requests remain native.
+
 Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
 
 The trim policy keeps system/developer items, the originating user request, and the newest completed tool turn first. OpenAI `assistant.tool_calls` plus `tool` results, Anthropic `tool_use` plus `tool_result` blocks, and Responses `function_call` plus `function_call_output` items are retained atomically. Oversized newest tool results are truncated while preserving both edges before older conversation turns are considered. If the required current tool structure still cannot fit, the adapter leaves the original request history intact so the upstream can return an explicit context error instead of receiving stale partial history.

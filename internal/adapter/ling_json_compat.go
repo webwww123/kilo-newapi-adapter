@@ -19,6 +19,8 @@ import (
 const (
 	lingJSONPublicModel              = publicModelPrefix + lingFlashFreeModel
 	lingTinyJSONPublicModel          = publicModelPrefix + lingTinyFreeModel
+	lingVLFreeModel                  = "inclusionai/ling-3.0-flash-vl:free"
+	lingVLJSONPublicModel            = publicModelPrefix + lingVLFreeModel
 	stepfunJSONPublicModel           = publicModelPrefix + stepfunFlashFreeModel
 	kiloAutoFreeModel                = "kilo-auto/free"
 	kiloAutoJSONPublicModel          = publicModelPrefix + kiloAutoFreeModel
@@ -414,6 +416,11 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	spec.PublicModel = publicModel
 	spec.FirstFloor = lingJSONFirstOutputFloor
 	spec.RepairFloor = lingJSONRepairOutputFloor
+	if publicModel == lingVLJSONPublicModel {
+		// Preserve caller output limits for VL, including bounded repair attempts.
+		spec.FirstFloor = 0
+		spec.RepairFloor = 0
+	}
 	if publicModel == lingTinyJSONPublicModel {
 		spec.RepairFloor = lingTinyJSONRepairOutputFloor
 	} else if profile == "stepfun" {
@@ -473,6 +480,8 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "ling", lingJSONPublicModel, true
 	case lingTinyJSONPublicModel, lingTinyFreeModel:
 		return "ling", lingTinyJSONPublicModel, true
+	case lingVLJSONPublicModel, lingVLFreeModel:
+		return "ling_vl", lingVLJSONPublicModel, true
 	case stepfunJSONPublicModel, stepfunFlashFreeModel:
 		return "stepfun", stepfunJSONPublicModel, true
 	case kiloAutoJSONPublicModel, kiloAutoFreeModel:
