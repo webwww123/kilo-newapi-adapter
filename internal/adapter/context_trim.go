@@ -45,7 +45,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"inclusionai/ling-3.0-tiny:free":                     {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"inclusionai/ling-3.0-flash-fin:free":                {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"inclusionai/ling-3.0-flash-sante:free":              {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
-	"inclusionai/ling-3.0-flash-vl:free":                 {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
+	lingVLFreeModel:                                      {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"nex-agi/nex-n2.5-mini:free":                         {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"nex-agi/nex-n2.5-pro:free":                          {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000},
 	"tencent/hy3:free":                                   {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 128000},

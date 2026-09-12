@@ -74,6 +74,14 @@ KILO_AUTO_TELEMETRY_ENABLED=false
 
 ## Free Model Context Trimming
 
+`kilo/inclusionai/ling-3.0-flash-vl:free` uses a 262144-token context profile,
+40000-token headroom and a 200000-token input budget. It preserves native image
+parts, complete tool turns and caller output limits. The paid VL model is unchanged.
+Chat `json_object` and `json_schema` use local validation with at most one repair;
+native `response_format` is omitted on both upstream attempts because VL rejects it.
+Structured streams are buffered until validated. Tools combined with a structured
+format return an explicit error; ordinary tool and image requests remain native.
+
 Context trimming is intentionally limited to manually profiled free models. Paid models and unknown models pass through unchanged.
 
 The trim policy keeps system/developer items, the originating user request, and the newest completed tool turn first. OpenAI `assistant.tool_calls` plus `tool` results, Anthropic `tool_use` plus `tool_result` blocks, and Responses `function_call` plus `function_call_output` items are retained atomically. Oversized newest tool results are truncated while preserving both edges before older conversation turns are considered. If the required current tool structure still cannot fit, the adapter leaves the original request history intact so the upstream can return an explicit context error instead of receiving stale partial history.
@@ -82,7 +90,7 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 `kilo-auto/free` uses its advertised 256000 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-tiny:free` uses its advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
-`inclusionai/ling-3.0-flash-fin:free`, `inclusionai/ling-3.0-flash-sante:free`, and `inclusionai/ling-3.0-flash-vl:free` use their advertised 262144 context with a 40000-token safety margin and a 200000-token maximum input budget.
+`inclusionai/ling-3.0-flash-fin:free` and `inclusionai/ling-3.0-flash-sante:free` use their advertised 262144 context with a 40000-token safety margin and a 200000-token maximum input budget.
 `nex-agi/nex-n2.5-mini:free` and `nex-agi/nex-n2.5-pro:free` use their advertised 262144 context with a 40000-token safety margin and a 200000-token maximum input budget.
 `nvidia/nemotron-3.5-lightning:free` uses its advertised 1000000 context, 65536 maximum completion tokens, a 40000-token safety margin, and a 900000-token maximum input budget.
 `tencent/hy3:free` uses its advertised 262144 context and 128000 maximum completion tokens, with a 40000-token safety margin and a 200000-token maximum input budget.

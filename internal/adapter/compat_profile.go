@@ -11,6 +11,7 @@ const (
 	lingTinyFreeModel           = "inclusionai/ling-3.0-tiny:free"
 	lingFinFreeModel            = "inclusionai/ling-3.0-flash-fin:free"
 	lingSanteFreeModel          = "inclusionai/ling-3.0-flash-sante:free"
+	lingVLFreeModel             = "inclusionai/ling-3.0-flash-vl:free"
 	lingMinExplicitOutputTokens = 256
 	lingMaxExplicitOutputTokens = 32768
 )
