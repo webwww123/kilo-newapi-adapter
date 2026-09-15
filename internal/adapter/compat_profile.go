@@ -9,7 +9,9 @@ import (
 const (
 	lingFlashFreeModel          = "inclusionai/ling-3.0-flash:free"
 	lingTinyFreeModel           = "inclusionai/ling-3.0-tiny:free"
-	lingTinyMinExplicitOutput   = 256
+	lingFinFreeModel            = "inclusionai/ling-3.0-flash-fin:free"
+	lingSanteFreeModel          = "inclusionai/ling-3.0-flash-sante:free"
+	lingMinExplicitOutputTokens = 256
 	lingMaxExplicitOutputTokens = 32768
 )
 
@@ -104,7 +106,7 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 	if dropLingOversizedOutputLimits(payload) {
 		stats.OversizedOutputDropped = true
 	}
-	if strings.TrimSpace(model) == lingTinyFreeModel && raiseLingTinyLowOutputLimits(payload) {
+	if minimum := lingMinExplicitOutput(model); minimum > 0 && raiseLingLowOutputLimits(payload, minimum) {
 		stats.LowOutputRaised = true
 	}
 
@@ -121,10 +123,20 @@ func normalizeLingRequest(body []byte, upstreamPath string) ([]byte, lingNormali
 
 func isLingCompatModel(model string) bool {
 	switch strings.TrimSpace(model) {
-	case lingFlashFreeModel, lingTinyFreeModel:
+	case lingFlashFreeModel, lingTinyFreeModel, lingFinFreeModel, lingSanteFreeModel:
 		return true
 	default:
 		return false
+	}
+}
+
+// lingMinExplicitOutput 返回推理会先消耗输出预算、需要抬高可见输出下限的模型下限；0 表示不调整。
+func lingMinExplicitOutput(model string) int {
+	switch strings.TrimSpace(model) {
+	case lingTinyFreeModel, lingFinFreeModel:
+		return lingMinExplicitOutputTokens
+	default:
+		return 0
 	}
 }
 
@@ -141,14 +153,14 @@ func dropLingOversizedOutputLimits(payload map[string]any) bool {
 	return dropped
 }
 
-func raiseLingTinyLowOutputLimits(payload map[string]any) bool {
+func raiseLingLowOutputLimits(payload map[string]any, minimum int) bool {
 	raised := false
 	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
 		limit, ok := payload[key].(float64)
-		if !ok || limit <= 0 || limit >= lingTinyMinExplicitOutput {
+		if !ok || limit <= 0 || limit >= float64(minimum) {
 			continue
 		}
-		payload[key] = float64(lingTinyMinExplicitOutput)
+		payload[key] = float64(minimum)
 		raised = true
 	}
 	return raised

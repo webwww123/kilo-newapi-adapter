@@ -292,7 +292,7 @@ func TestProxyRaisesLingTinyLowOutputLimit(t *testing.T) {
 	if rec.Code != http.StatusOK || len(*calls) != 1 {
 		t.Fatalf("status=%d calls=%d body=%s", rec.Code, len(*calls), rec.Body.String())
 	}
-	if (*calls)[0].Body["max_tokens"] != float64(lingTinyMinExplicitOutput) {
+	if (*calls)[0].Body["max_tokens"] != float64(lingMinExplicitOutputTokens) {
 		t.Fatalf("Tiny max_tokens was not raised: %#v", (*calls)[0].Body)
 	}
 }

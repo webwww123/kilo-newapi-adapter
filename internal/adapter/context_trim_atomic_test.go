@@ -405,6 +405,27 @@ func TestArrayValuedUserContentIsNotBlank(t *testing.T) {
 	}
 }
 
+func TestFreeContextTrimProfilesCoverOnboardedFreeModels(t *testing.T) {
+	models := []string{
+		"inclusionai/ling-3.0-flash-fin:free",
+		"inclusionai/ling-3.0-flash-sante:free",
+		"inclusionai/ling-3.0-flash-vl:free",
+		"nex-agi/nex-n2.5-mini:free",
+		"nex-agi/nex-n2.5-pro:free",
+		"nvidia/nemotron-3.5-lightning:free",
+	}
+	for _, model := range models {
+		profile, ok := freeContextTrimProfiles[model]
+		if !ok {
+			t.Fatalf("missing context trim profile for %s", model)
+		}
+		normalized := normalizeContextTrimProfile(profile)
+		if normalized.ContextLimit <= 0 || normalized.MaxInputTokens <= 0 || normalized.MaxInputTokens >= normalized.ContextLimit {
+			t.Fatalf("unusable context trim profile for %s: %#v", model, normalized)
+		}
+	}
+}
+
 func withContextTrimProfile(t *testing.T, model string, profile contextTrimProfile) {
 	t.Helper()
 	previous, existed := freeContextTrimProfiles[model]

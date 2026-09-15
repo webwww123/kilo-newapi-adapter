@@ -82,6 +82,8 @@ Current free-model profiles are maintained in `internal/adapter/context_trim.go`
 `kilo-auto/free` uses its advertised 256000 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-flash:free` uses its advertised 262144 context window with a 40000-token safety margin and a 200000-token maximum input budget.
 `inclusionai/ling-3.0-tiny:free` uses its advertised 262144 context, 32768 maximum completion tokens, 40000-token safety margin, and 200000-token maximum input budget.
+`inclusionai/ling-3.0-flash-fin:free`, `inclusionai/ling-3.0-flash-sante:free`, and `inclusionai/ling-3.0-flash-vl:free` use their advertised 262144 context with a 40000-token safety margin and a 200000-token maximum input budget.
+`nex-agi/nex-n2.5-mini:free` and `nex-agi/nex-n2.5-pro:free` use their advertised 262144 context with a 40000-token safety margin and a 200000-token maximum input budget.
 `nvidia/nemotron-3.5-lightning:free` uses its advertised 1000000 context, 65536 maximum completion tokens, a 40000-token safety margin, and a 900000-token maximum input budget.
 `tencent/hy3:free` uses its advertised 262144 context and 128000 maximum completion tokens, with a 40000-token safety margin and a 200000-token maximum input budget.
 `dots-studio/dots-3-note-preview:free` uses its advertised 512000 context with a 40000-token safety margin, a 400000-token maximum input budget, and a 256000-token safe output cap.
@@ -91,7 +93,7 @@ HY3, Dots, Inkling Small, and Inkling requests use model-scoped reasoning and ou
 
 For HY3 Chat Completions, an OpenAI selected-function `tool_choice` is normalized to the single selected tool plus `tool_choice: "required"`. This preserves the requested function while avoiding Kilo's unreliable selected-function object handling. `auto`, `none`, `required`, malformed selections, and all sibling models are passed through unchanged.
 
-The profiled Ling Flash-free and Ling Tiny-free requests are normalized locally before they reach Kilo. Image, audio, video, and
+The profiled Ling Flash-free, Ling Tiny-free, Ling Flash Fin-free, and Ling Flash Sante-free requests are normalized locally before they reach Kilo. Image, audio, video, and
 Embeddings requests are rejected locally with the generic public 400 error. Unsupported reasoning-effort
 controls are removed. Chat Completions `json_object` and strict `json_schema` requests are captured before
 the upstream cleanup step and emulated in-process for Ling and StepFun 3.7: the adapter validates the completed
@@ -103,9 +105,10 @@ For Ling Tiny and Kilo Auto `json_object`, if both validated attempts still retu
 Ordinary Lightning SSE also emits a body-free `kilo_stream_audit` line with event/parse/error counts, visible/tool delta counts, completion tokens, DONE state, and a `suspected_soft_error` flag for correlating HTTP 200 plus zero-completion rows without logging content.
 Requests combining tools with `response_format` are rejected locally for these profiles; ordinary tools and
 requests without `response_format` stay on the existing path. For the profiled Ling models, explicit `max_tokens`, `max_completion_tokens`,
-and `max_output_tokens` values up to 32768 are preserved; for Ling Tiny, positive values below 256 are
+and `max_output_tokens` values up to 32768 are preserved; for Ling Tiny and Ling Flash Fin, positive values below 256 are
 raised to 256 so its reasoning phase cannot consume the full allowance before visible output. Larger values are removed so Kilo can
-apply its model/provider default instead of returning a generic upstream 400. If an oversized
+apply its model/provider default instead of returning a generic upstream 400. Ling Flash Fin-free and Ling Flash Sante-free reject every
+`response_format` variant upstream, so their repair attempt keeps the format stripped instead of re-adding `json_object`. If an oversized
 tool or externally stateful request cannot be trimmed without breaking call/result pairing,
 the adapter rejects it locally instead of forwarding stale or partial history; the detailed
 reason remains available in the internal request log.

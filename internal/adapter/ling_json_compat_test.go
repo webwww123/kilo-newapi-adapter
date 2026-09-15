@@ -489,6 +489,10 @@ func TestKiloAutoAndNemotronJSONCompatRepairWithoutForwardingFormat(t *testing.T
 		{name: "ultra_schema", publicModel: nemotronUltraJSONPublicModel, upstreamModel: nemotronUltraFreeModel, format: schemaFormat, embeddedError: true, repairFloor: lingJSONRepairOutputFloor},
 		{name: "lightning_object", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: `{"type":"json_object"}`, repairFloor: lingJSONRepairOutputFloor},
 		{name: "lightning_schema_stream", publicModel: nemotronLightningJSONPublicModel, upstreamModel: nemotronLightningFreeModel, format: schemaFormat, stream: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "ling_fin_object", publicModel: lingFinJSONPublicModel, upstreamModel: lingFinFreeModel, format: `{"type":"json_object"}`, repairFloor: lingJSONRepairOutputFloor},
+		{name: "ling_fin_schema_stream", publicModel: lingFinJSONPublicModel, upstreamModel: lingFinFreeModel, format: schemaFormat, stream: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "ling_sante_object_stream", publicModel: lingSanteJSONPublicModel, upstreamModel: lingSanteFreeModel, format: `{"type":"json_object"}`, stream: true, repairFloor: lingJSONRepairOutputFloor},
+		{name: "ling_sante_schema", publicModel: lingSanteJSONPublicModel, upstreamModel: lingSanteFreeModel, format: schemaFormat, repairFloor: lingJSONRepairOutputFloor},
 	}
 
 	for _, tc := range tests {

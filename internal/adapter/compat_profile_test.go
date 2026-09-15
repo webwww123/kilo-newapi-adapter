@@ -158,9 +158,56 @@ func TestNormalizeLingTinyRaisesLowOutputLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
-		if payload[key] != float64(lingTinyMinExplicitOutput) {
-			t.Fatalf("%s=%#v, want %d: %#v", key, payload[key], lingTinyMinExplicitOutput, payload)
+		if payload[key] != float64(lingMinExplicitOutputTokens) {
+			t.Fatalf("%s=%#v, want %d: %#v", key, payload[key], lingMinExplicitOutputTokens, payload)
 		}
+	}
+}
+
+func TestNormalizeLingFlashVariantsUseLingProfile(t *testing.T) {
+	models := []string{lingFinFreeModel, lingSanteFreeModel}
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			if !isLingCompatModel(model) {
+				t.Fatalf("%s is not covered by the Ling profile", model)
+			}
+
+			body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","response_format":{"type":"json_object"},"max_tokens":65536}`)
+			out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+			if err != nil || rejection != nil {
+				t.Fatalf("err=%v rejection=%#v", err, rejection)
+			}
+			if !stats.ReasoningDropped || !stats.StructuredOutputDropped || !stats.OversizedOutputDropped {
+				t.Fatalf("unsupported controls were not dropped: stats=%#v out=%s", stats, out)
+			}
+
+			image := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}}]}]}`)
+			_, _, rejection, err = normalizeLingRequest(image, "/chat/completions")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rejection == nil || rejection.Code != "unsupported_image_input" {
+				t.Fatalf("image rejection=%#v, want unsupported_image_input", rejection)
+			}
+		})
+	}
+}
+
+func TestNormalizeLingFinRaisesLowOutputLimits(t *testing.T) {
+	body := []byte(`{"model":"` + lingFinFreeModel + `","messages":[{"role":"user","content":"hello"}],"max_tokens":64}`)
+	out, stats, rejection, err := normalizeLingRequest(body, "/chat/completions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejection != nil || !stats.LowOutputRaised {
+		t.Fatalf("Fin low output limit was not raised: stats=%#v rejection=%#v", stats, rejection)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(out, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["max_tokens"] != float64(lingMinExplicitOutputTokens) {
+		t.Fatalf("max_tokens=%#v, want %d: %#v", payload["max_tokens"], lingMinExplicitOutputTokens, payload)
 	}
 }
 

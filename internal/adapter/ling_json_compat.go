@@ -19,6 +19,8 @@ import (
 const (
 	lingJSONPublicModel              = publicModelPrefix + lingFlashFreeModel
 	lingTinyJSONPublicModel          = publicModelPrefix + lingTinyFreeModel
+	lingFinJSONPublicModel           = publicModelPrefix + lingFinFreeModel
+	lingSanteJSONPublicModel         = publicModelPrefix + lingSanteFreeModel
 	stepfunJSONPublicModel           = publicModelPrefix + stepfunFlashFreeModel
 	kiloAutoFreeModel                = "kilo-auto/free"
 	kiloAutoJSONPublicModel          = publicModelPrefix + kiloAutoFreeModel
@@ -480,6 +482,10 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "ling", lingJSONPublicModel, true
 	case lingTinyJSONPublicModel, lingTinyFreeModel:
 		return "ling", lingTinyJSONPublicModel, true
+	case lingFinJSONPublicModel, lingFinFreeModel:
+		return "ling_fin", lingFinJSONPublicModel, true
+	case lingSanteJSONPublicModel, lingSanteFreeModel:
+		return "ling_sante", lingSanteJSONPublicModel, true
 	case stepfunJSONPublicModel, stepfunFlashFreeModel:
 		return "stepfun", stepfunJSONPublicModel, true
 	case kiloAutoJSONPublicModel, kiloAutoFreeModel:
