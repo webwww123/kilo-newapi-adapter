@@ -29,7 +29,9 @@ func normalizeKiloToolHistoryRequest(body []byte, path string) ([]byte, toolHist
 		return body, stats, nil
 	}
 	switch strings.TrimPrefix(model, publicModelPrefix) {
-	case stepfunFlashFreeModel, "kilo-auto/free", thinkingMachinesInklingFreeModel, thinkingMachinesInklingSmallFreeModel:
+	case stepfunFlashFreeModel, "kilo-auto/free", thinkingMachinesInklingFreeModel, thinkingMachinesInklingSmallFreeModel,
+		nexProFreeModel, nexMiniFreeModel, nemotronLightningFreeModel,
+		lingFinFreeModel, lingSanteFreeModel, lingVLFreeModel:
 	default:
 		return body, stats, nil
 	}
@@ -124,11 +126,25 @@ func toolHistoryString(raw json.RawMessage) string {
 	return value
 }
 
-// Inkling's Messages schema requires a string signature even for unsigned
+// requiresThinkingSignature 列出 Messages 协议下历史 thinking 必须带字符串 signature
+// 的模型。缺 signature 时上游会整体拒绝请求（invalid_union: expected string,
+// received undefined），补空字符串即通过，thinking 正文原样保留。
+func requiresThinkingSignature(model string) bool {
+	switch model {
+	case thinkingMachinesInklingFreeModel, thinkingMachinesInklingSmallFreeModel,
+		nexProFreeModel, nexMiniFreeModel, nemotronLightningFreeModel,
+		lingFinFreeModel, lingSanteFreeModel, lingVLFreeModel:
+		return true
+	default:
+		return false
+	}
+}
+
+// Kilo's Messages schema requires a string signature even for unsigned
 // historical thinking. Preserve all existing signatures and the thinking text.
 func normalizeKiloHistoricalThinkingSignature(body []byte, payload map[string]json.RawMessage, messages []map[string]json.RawMessage, model string) ([]byte, toolHistoryCompatStats, error) {
 	var stats toolHistoryCompatStats
-	if model != thinkingMachinesInklingFreeModel && model != thinkingMachinesInklingSmallFreeModel {
+	if !requiresThinkingSignature(model) {
 		return body, stats, nil
 	}
 	lastUser := -1

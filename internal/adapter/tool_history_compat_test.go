@@ -148,3 +148,35 @@ func TestKiloInklingHistoricalThinkingMissingSignature(t *testing.T) {
 		t.Fatal("signature normalization is not idempotent")
 	}
 }
+
+func TestKiloOnboardedFreeModelsGetHistoricalThinkingSignature(t *testing.T) {
+	models := []string{
+		"kilo/nex-agi/nex-n2.5-pro:free",
+		"kilo/nex-agi/nex-n2.5-mini:free",
+		"kilo/nvidia/nemotron-3.5-lightning:free",
+		"kilo/inclusionai/ling-3.0-flash-fin:free",
+		"kilo/inclusionai/ling-3.0-flash-sante:free",
+		"kilo/inclusionai/ling-3.0-flash-vl:free",
+	}
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"Check status."},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier status was checked."},{"type":"text","text":"OK"}]},{"role":"user","content":"Continue."}]}`)
+			out, stats, err := normalizeKiloToolHistoryRequest(body, "/messages")
+			if err != nil || stats.EmptyThinkingSignatures != 1 {
+				t.Fatalf("stats=%+v err=%v", stats, err)
+			}
+			if !bytes.Contains(out, []byte(`"signature":""`)) || !bytes.Contains(out, []byte(`Earlier status was checked.`)) {
+				t.Fatalf("signature placeholder missing or history changed: %s", out)
+			}
+			again, unchanged, err := normalizeKiloToolHistoryRequest(out, "/messages")
+			if err != nil || !bytes.Equal(again, out) || unchanged != (toolHistoryCompatStats{}) {
+				t.Fatal("signature normalization is not idempotent")
+			}
+		})
+	}
+
+	unlisted := []byte(`{"model":"kilo/openrouter/free","messages":[{"role":"user","content":"Check status."},{"role":"assistant","content":[{"type":"thinking","thinking":"Earlier status was checked."}]},{"role":"user","content":"Continue."}]}`)
+	if out, stats, err := normalizeKiloToolHistoryRequest(unlisted, "/messages"); err != nil || !bytes.Equal(out, unlisted) || stats != (toolHistoryCompatStats{}) {
+		t.Fatal("unlisted model history was rewritten")
+	}
+}

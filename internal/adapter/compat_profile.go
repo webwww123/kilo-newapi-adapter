@@ -12,6 +12,8 @@ const (
 	lingFinFreeModel            = "inclusionai/ling-3.0-flash-fin:free"
 	lingSanteFreeModel          = "inclusionai/ling-3.0-flash-sante:free"
 	lingVLFreeModel             = "inclusionai/ling-3.0-flash-vl:free"
+	nexProFreeModel             = "nex-agi/nex-n2.5-pro:free"
+	nexMiniFreeModel            = "nex-agi/nex-n2.5-mini:free"
 	lingMinExplicitOutputTokens = 256
 	lingMaxExplicitOutputTokens = 32768
 )
