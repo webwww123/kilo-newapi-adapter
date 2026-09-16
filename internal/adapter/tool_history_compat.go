@@ -10,6 +10,7 @@ type toolHistoryCompatStats struct {
 	EmptyArguments          int
 	ObjectArguments         int
 	EmptyThinkingSignatures int
+	EmptyThinkingTexts      int
 }
 
 // Kilo validates the string type even for completed historical tool calls.
@@ -126,6 +127,20 @@ func toolHistoryString(raw json.RawMessage) string {
 	return value
 }
 
+// toolHistoryStringValue 只在原值确实是字符串时返回 true（含空字符串）。
+// JSON null 反序列化到 string 不报错，必须单独判掉。
+func toolHistoryStringValue(raw json.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(trimmed, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
 // requiresThinkingSignature 列出 Messages 协议下历史 thinking 必须带字符串 signature
 // 的模型。缺 signature 时上游会整体拒绝请求（invalid_union: expected string,
 // received undefined），补空字符串即通过，thinking 正文原样保留。
@@ -140,8 +155,9 @@ func requiresThinkingSignature(model string) bool {
 	}
 }
 
-// Kilo's Messages schema requires a string signature even for unsigned
-// historical thinking. Preserve all existing signatures and the thinking text.
+// Kilo's Messages schema requires string thinking and signature fields on every
+// historical thinking block. Preserve existing string values, including empty
+// ones, and replace only what is missing or of another type.
 func normalizeKiloHistoricalThinkingSignature(body []byte, payload map[string]json.RawMessage, messages []map[string]json.RawMessage, model string) ([]byte, toolHistoryCompatStats, error) {
 	var stats toolHistoryCompatStats
 	if !requiresThinkingSignature(model) {
@@ -166,16 +182,16 @@ func normalizeKiloHistoricalThinkingSignature(body []byte, payload map[string]js
 			if toolHistoryString(block["type"]) != "thinking" {
 				continue
 			}
-			if _, exists := block["signature"]; exists {
-				continue
+			if _, ok := toolHistoryStringValue(block["signature"]); !ok {
+				block["signature"] = json.RawMessage(`""`)
+				stats.EmptyThinkingSignatures++
+				changed = true
 			}
-			var thinking string
-			if json.Unmarshal(block["thinking"], &thinking) != nil {
-				continue
+			if _, ok := toolHistoryStringValue(block["thinking"]); !ok {
+				block["thinking"] = json.RawMessage(`""`)
+				stats.EmptyThinkingTexts++
+				changed = true
 			}
-			block["signature"] = json.RawMessage(`""`)
-			stats.EmptyThinkingSignatures++
-			changed = true
 		}
 		if changed {
 			encoded, err := json.Marshal(blocks)
@@ -185,7 +201,7 @@ func normalizeKiloHistoricalThinkingSignature(body []byte, payload map[string]js
 			message["content"] = encoded
 		}
 	}
-	if stats.EmptyThinkingSignatures == 0 {
+	if stats.EmptyThinkingSignatures+stats.EmptyThinkingTexts == 0 {
 		return body, stats, nil
 	}
 	encoded, err := json.Marshal(messages)

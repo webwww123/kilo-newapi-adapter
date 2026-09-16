@@ -267,8 +267,8 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", "invalid tool history")
 		return
 	}
-	if historyStats.EmptyArguments+historyStats.ObjectArguments+historyStats.EmptyThinkingSignatures > 0 {
-		fmt.Printf("kilo_tool_history_compat empty_arguments=%d object_arguments=%d empty_thinking_signatures=%d\n", historyStats.EmptyArguments, historyStats.ObjectArguments, historyStats.EmptyThinkingSignatures)
+	if historyStats.EmptyArguments+historyStats.ObjectArguments+historyStats.EmptyThinkingSignatures+historyStats.EmptyThinkingTexts > 0 {
+		fmt.Printf("kilo_tool_history_compat empty_arguments=%d object_arguments=%d empty_thinking_signatures=%d empty_thinking_texts=%d\n", historyStats.EmptyArguments, historyStats.ObjectArguments, historyStats.EmptyThinkingSignatures, historyStats.EmptyThinkingTexts)
 	}
 
 	body, lingStats, lingRejection, err := normalizeLingRequest(body, upstreamPath)

@@ -180,3 +180,46 @@ func TestKiloOnboardedFreeModelsGetHistoricalThinkingSignature(t *testing.T) {
 		t.Fatal("unlisted model history was rewritten")
 	}
 }
+
+func TestKiloHistoricalThinkingRequiresStringFields(t *testing.T) {
+	build := func(block string) []byte {
+		return []byte(`{"model":"kilo/nex-agi/nex-n2.5-pro:free","messages":[{"role":"user","content":"Check status."},{"role":"assistant","content":[` + block + `,{"type":"text","text":"OK"}]},{"role":"user","content":"Continue."}]}`)
+	}
+	tests := []struct {
+		name          string
+		block         string
+		statSignature int
+		statText      int
+	}{
+		{name: "null signature", block: `{"type":"thinking","thinking":"kept","signature":null}`, statSignature: 1},
+		{name: "numeric signature", block: `{"type":"thinking","thinking":"kept","signature":7}`, statSignature: 1},
+		{name: "missing thinking text", block: `{"type":"thinking","signature":"kept"}`, statText: 1},
+		{name: "null thinking text", block: `{"type":"thinking","thinking":null,"signature":""}`, statText: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, stats, err := normalizeKiloToolHistoryRequest(build(tc.block), "/messages")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stats.EmptyThinkingSignatures != tc.statSignature || stats.EmptyThinkingTexts != tc.statText {
+				t.Fatalf("stats=%+v", stats)
+			}
+			if !bytes.Contains(out, []byte(`"thinking":""`)) && tc.statText > 0 {
+				t.Fatalf("thinking placeholder missing: %s", out)
+			}
+			if !bytes.Contains(out, []byte(`"signature":""`)) && tc.statSignature > 0 {
+				t.Fatalf("signature placeholder missing: %s", out)
+			}
+			again, unchanged, err := normalizeKiloToolHistoryRequest(out, "/messages")
+			if err != nil || !bytes.Equal(again, out) || unchanged != (toolHistoryCompatStats{}) {
+				t.Fatal("string field normalization is not idempotent")
+			}
+		})
+	}
+
+	preserved := build(`{"type":"thinking","thinking":"kept","signature":"opaque"}`)
+	if out, stats, err := normalizeKiloToolHistoryRequest(preserved, "/messages"); err != nil || stats != (toolHistoryCompatStats{}) || !bytes.Equal(out, preserved) {
+		t.Fatal("existing string fields were rewritten")
+	}
+}
