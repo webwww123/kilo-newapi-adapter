@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -111,6 +112,42 @@ func TestLingJSONCompatLeavesOrdinaryAndOtherModelsOnExistingPath(t *testing.T) 
 	}
 	if _, exists := (*calls)[2]["response_format"]; !exists {
 		t.Fatalf("paid Flash response_format was intercepted: %#v", (*calls)[2])
+	}
+}
+
+func TestLingJSONCompatCoversLagunaSAndGLM52(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(call int, payload map[string]any) string {
+		if strings.Contains(fmt.Sprint(payload["model"]), "laguna-s") {
+			if call == 1 {
+				return jsonCompatTestCompletion(t, lagunaSFreeModel, "not json at all")
+			}
+			return jsonCompatTestCompletion(t, lagunaSFreeModel, `{"a": 1}`)
+		}
+		return jsonCompatTestCompletion(t, glm52FreeModel, `{"a": 1}`)
+	})
+	defer closeUpstream()
+
+	laguna := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/poolside/laguna-s-2.1:free","messages":[{"role":"user","content":"return data"}],"response_format":{"type":"json_object"},"max_tokens":16}`)
+	if laguna.Code != http.StatusOK {
+		t.Fatalf("laguna-s status=%d body=%s", laguna.Code, laguna.Body.String())
+	}
+	if content := lingJSONTestResponseContent(t, laguna.Body.Bytes()); strings.TrimSpace(content) != `{"a":1}` {
+		t.Fatalf("laguna-s content=%q", content)
+	}
+	glm := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/z-ai/glm-5.2:free","messages":[{"role":"user","content":"return data"}],"response_format":{"type":"json_object"},"max_tokens":16}`)
+	if glm.Code != http.StatusOK {
+		t.Fatalf("glm status=%d body=%s", glm.Code, glm.Body.String())
+	}
+	if len(*calls) != 3 {
+		t.Fatalf("upstream calls=%d, want 3", len(*calls))
+	}
+	for i, call := range *calls {
+		if _, exists := call["response_format"]; exists {
+			t.Fatalf("call %d kept response_format: %#v", i, call)
+		}
+		if call["stream"] != false {
+			t.Fatalf("call %d not forced non-stream: %#v", i, call)
+		}
 	}
 }
 

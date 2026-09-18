@@ -35,6 +35,10 @@ const (
 	openRouterJSONPublicModel        = publicModelPrefix + openRouterFreeModel
 	northMiniCodeFreeModel           = "cohere/north-mini-code:free"
 	northMiniCodeJSONPublicModel     = publicModelPrefix + northMiniCodeFreeModel
+	lagunaSFreeModel                 = "poolside/laguna-s-2.1:free"
+	lagunaSJSONPublicModel           = publicModelPrefix + lagunaSFreeModel
+	glm52FreeModel                   = "z-ai/glm-5.2:free"
+	glm52JSONPublicModel             = publicModelPrefix + glm52FreeModel
 	dotsNoteJSONPublicModel          = publicModelPrefix + dotsStudioNotePreviewFreeModel
 	inklingSmallJSONPublicModel      = publicModelPrefix + thinkingMachinesInklingSmallFreeModel
 	inklingJSONPublicModel           = publicModelPrefix + thinkingMachinesInklingFreeModel
@@ -508,6 +512,10 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "openrouter_free", openRouterJSONPublicModel, true
 	case northMiniCodeJSONPublicModel, northMiniCodeFreeModel:
 		return "north_mini_code", northMiniCodeJSONPublicModel, true
+	case lagunaSJSONPublicModel, lagunaSFreeModel:
+		return "laguna_s", lagunaSJSONPublicModel, true
+	case glm52JSONPublicModel, glm52FreeModel:
+		return "glm_5_2", glm52JSONPublicModel, true
 	case dotsNoteJSONPublicModel, dotsStudioNotePreviewFreeModel:
 		return "dots_note", dotsNoteJSONPublicModel, true
 	case inklingSmallJSONPublicModel, thinkingMachinesInklingSmallFreeModel:
