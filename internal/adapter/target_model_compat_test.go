@@ -335,3 +335,79 @@ func TestTargetFreeModelContextProfiles(t *testing.T) {
 		}
 	}
 }
+
+func TestNemotronFreeModelsForceReasoningOffAcrossProtocols(t *testing.T) {
+	upstream, calls := newRecordingUpstream(t)
+	defer upstream.Close()
+
+	handler := newTestHandler(upstream.URL)
+	for _, model := range []string{
+		"kilo/nvidia/nemotron-3-super-120b-a12b:free",
+		"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+		"kilo/nvidia/nemotron-3.5-lightning:free",
+	} {
+		t.Run(model+" chat", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/chat/completions", `{
+				"model":"`+model+`",
+				"messages":[{"role":"user","content":"hi"}],
+				"reasoning_effort":"high",
+				"reasoning":{"enabled":true,"effort":"high"},
+				"max_tokens":64
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			if call["reasoning_effort"] != "none" {
+				t.Fatalf("reasoning_effort=%#v want none, body=%#v", call["reasoning_effort"], call)
+			}
+			for _, key := range []string{"reasoning", "thinking"} {
+				if _, exists := call[key]; exists {
+					t.Fatalf("unexpected %s in body=%#v", key, call)
+				}
+			}
+			if call["max_tokens"] != float64(64) {
+				t.Fatalf("max_tokens should pass through unchanged, body=%#v", call)
+			}
+		})
+
+		t.Run(model+" messages", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/messages", `{
+				"model":"`+model+`",
+				"messages":[{"role":"user","content":"hi"}],
+				"thinking":{"type":"enabled","budget_tokens":32000},
+				"reasoning_effort":"high"
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			thinking, ok := call["thinking"].(map[string]any)
+			if !ok || thinking["type"] != "disabled" || len(thinking) != 1 {
+				t.Fatalf("thinking=%#v want disabled, body=%#v", call["thinking"], call)
+			}
+			if _, exists := call["reasoning_effort"]; exists {
+				t.Fatalf("reasoning_effort should be removed, body=%#v", call)
+			}
+		})
+
+		t.Run(model+" responses", func(t *testing.T) {
+			before := len(*calls)
+			rec := postJSON(t, handler, "/v1/responses", `{
+				"model":"`+model+`",
+				"input":"hi",
+				"reasoning":{"effort":"high","max_tokens":32000}
+			}`)
+			if rec.Code != 200 {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			call := (*calls)[before].Body
+			reasoning, ok := call["reasoning"].(map[string]any)
+			if !ok || reasoning["effort"] != "none" || len(reasoning) != 1 {
+				t.Fatalf("reasoning=%#v want effort=none, body=%#v", call["reasoning"], call)
+			}
+		})
+	}
+}

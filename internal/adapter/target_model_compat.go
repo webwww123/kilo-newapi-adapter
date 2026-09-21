@@ -3,6 +3,7 @@ package adapter
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -35,19 +36,33 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	stats.Model = model
 	path := strings.TrimRight(strings.TrimSpace(upstreamPath), "/")
 
+	reasoningEffort := targetMinimalReasoningEffort
+	messagesThinking := map[string]any{
+		"type":          "enabled",
+		"budget_tokens": float64(targetMessagesThinkingTokens),
+	}
+	normalizeOutputBudget := true
 	switch model {
 	case tencentHY3FreeModel,
 		dotsStudioNotePreviewFreeModel,
 		thinkingMachinesInklingSmallFreeModel,
 		thinkingMachinesInklingFreeModel:
 	default:
-		return body, stats, nil
+		// Nemotron-family free models leak truncated reasoning into content
+		// when thinking consumes the output budget; force reasoning off
+		// without touching their output budget handling.
+		if !strings.Contains(strings.ToLower(model), "nemotron") {
+			return body, stats, nil
+		}
+		reasoningEffort = "none"
+		messagesThinking = map[string]any{"type": "disabled"}
+		normalizeOutputBudget = false
 	}
 
-	if normalizeTargetReasoning(payload, path) {
+	if normalizeTargetReasoning(payload, path, reasoningEffort, messagesThinking) {
 		stats.ReasoningNormalized = true
 	}
-	if normalizeTargetOutputBudget(payload, path, targetModelMinOutputTokens) {
+	if normalizeOutputBudget && normalizeTargetOutputBudget(payload, path, targetModelMinOutputTokens) {
 		stats.OutputBudgetNormalized = true
 	}
 	if model == tencentHY3FreeModel && path == "/chat/completions" && normalizeHY3ForcedFunctionChoice(payload) {
@@ -65,7 +80,7 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	return out, stats, nil
 }
 
-func normalizeTargetReasoning(payload map[string]any, path string) bool {
+func normalizeTargetReasoning(payload map[string]any, path string, reasoningEffort string, messagesThinking map[string]any) bool {
 	remove := func(key string) bool {
 		if _, exists := payload[key]; !exists {
 			return false
@@ -79,27 +94,23 @@ func normalizeTargetReasoning(payload map[string]any, path string) bool {
 	case "/chat/completions":
 		changed = remove("reasoning") || changed
 		changed = remove("thinking") || changed
-		if effort, ok := payload["reasoning_effort"].(string); !ok || strings.ToLower(strings.TrimSpace(effort)) != targetMinimalReasoningEffort {
-			payload["reasoning_effort"] = targetMinimalReasoningEffort
+		if effort, ok := payload["reasoning_effort"].(string); !ok || strings.ToLower(strings.TrimSpace(effort)) != reasoningEffort {
+			payload["reasoning_effort"] = reasoningEffort
 			changed = true
 		}
 	case "/messages":
 		changed = remove("reasoning_effort") || changed
 		changed = remove("reasoning") || changed
-		thinking, ok := payload["thinking"].(map[string]any)
-		if !ok || thinking["type"] != "enabled" || thinking["budget_tokens"] != float64(targetMessagesThinkingTokens) || len(thinking) != 2 {
-			payload["thinking"] = map[string]any{
-				"type":          "enabled",
-				"budget_tokens": float64(targetMessagesThinkingTokens),
-			}
+		if !reflect.DeepEqual(payload["thinking"], messagesThinking) {
+			payload["thinking"] = messagesThinking
 			changed = true
 		}
 	case "/responses":
 		changed = remove("reasoning_effort") || changed
 		changed = remove("thinking") || changed
 		reasoning, ok := payload["reasoning"].(map[string]any)
-		if !ok || reasoning["effort"] != targetMinimalReasoningEffort || len(reasoning) != 1 {
-			payload["reasoning"] = map[string]any{"effort": targetMinimalReasoningEffort}
+		if !ok || reasoning["effort"] != reasoningEffort || len(reasoning) != 1 {
+			payload["reasoning"] = map[string]any{"effort": reasoningEffort}
 			changed = true
 		}
 	}
