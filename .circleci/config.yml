@@ -1,0 +1,66 @@
+version: 2.1
+
+parameters:
+  build_requested:
+    type: boolean
+    default: true
+  expected_commit:
+    type: string
+    default: ""
+
+jobs:
+  test-and-build:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large.gen2
+    environment:
+      EXPECTED_COMMIT: << pipeline.parameters.expected_commit >>
+      GO_VERSION: "1.24.4"
+    steps:
+      - checkout
+      - run:
+          name: Verify source revision
+          command: |
+            test -z "$EXPECTED_COMMIT" || test "$CIRCLE_SHA1" = "$EXPECTED_COMMIT"
+            test "$(git rev-parse HEAD)" = "$CIRCLE_SHA1"
+      - run:
+          name: Set up Go
+          command: |
+            sudo rm -rf /usr/local/go
+            curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+            sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+            /usr/local/go/bin/go version
+      - run:
+          name: Test
+          command: /usr/local/go/bin/go test ./...
+      - run:
+          name: Race test
+          command: /usr/local/go/bin/go test -race ./...
+      - run:
+          name: Vet
+          command: /usr/local/go/bin/go vet ./...
+      - run:
+          name: Telemetry report tests
+          command: python3 -B -m unittest discover -s scripts -p 'test_*.py'
+      - run:
+          name: Build Linux amd64
+          environment:
+            CGO_ENABLED: "0"
+            GOOS: linux
+            GOARCH: amd64
+          command: |
+            mkdir -p /tmp/adapter-artifacts
+            /usr/local/go/bin/go build -trimpath -ldflags="-s -w" -o /tmp/adapter-artifacts/kilo-newapi-adapter ./cmd/kilo-newapi-adapter
+            git rev-parse HEAD > /tmp/adapter-artifacts/source-commit.txt
+            cd /tmp/adapter-artifacts
+            sha256sum kilo-newapi-adapter source-commit.txt > SHA256SUMS
+      - store_artifacts:
+          path: /tmp/adapter-artifacts
+          destination: kilo-newapi-adapter
+
+workflows:
+  test-and-build:
+    when:
+      << pipeline.parameters.build_requested >>
+    jobs:
+      - test-and-build
