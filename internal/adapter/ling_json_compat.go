@@ -42,6 +42,7 @@ const (
 	dotsNoteJSONPublicModel          = publicModelPrefix + dotsStudioNotePreviewFreeModel
 	inklingSmallJSONPublicModel      = publicModelPrefix + thinkingMachinesInklingSmallFreeModel
 	inklingJSONPublicModel           = publicModelPrefix + thinkingMachinesInklingFreeModel
+	spaceBunnyJSONPublicModel        = publicModelPrefix + spaceBunnyAlphaModel
 	lingJSONMaxSchemaBytes           = 64 << 10
 	lingJSONMaxRepairBytes           = 64 << 10
 	lingJSONFirstOutputFloor         = 256
@@ -522,6 +523,8 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "inkling_small", inklingSmallJSONPublicModel, true
 	case inklingJSONPublicModel, thinkingMachinesInklingFreeModel:
 		return "inkling", inklingJSONPublicModel, true
+	case spaceBunnyJSONPublicModel, spaceBunnyAlphaModel:
+		return "space_bunny", spaceBunnyJSONPublicModel, true
 	default:
 		return "", "", false
 	}

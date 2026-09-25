@@ -605,6 +605,8 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		{name: "inkling_small_schema", requestModel: "thinkingmachines/inkling-small:free", upstreamModel: "thinkingmachines/inkling-small:free", publicModel: "kilo/thinkingmachines/inkling-small:free", format: schemaFormat, targetBudget: true},
 		{name: "inkling_object", requestModel: "thinkingmachines/inkling:free", upstreamModel: "thinkingmachines/inkling:free", publicModel: "kilo/thinkingmachines/inkling:free", format: `{"type":"json_object"}`, targetBudget: true},
 		{name: "inkling_schema_stream", requestModel: "kilo/thinkingmachines/inkling:free", upstreamModel: "thinkingmachines/inkling:free", publicModel: "kilo/thinkingmachines/inkling:free", format: schemaFormat, stream: true, targetBudget: true},
+		{name: "spacebunny_object", requestModel: "kilo/stealth/space-bunny-alpha", upstreamModel: "stealth/space-bunny-alpha", publicModel: "kilo/stealth/space-bunny-alpha", format: `{"type":"json_object"}`, targetBudget: true},
+		{name: "spacebunny_schema_stream", requestModel: "kilo/stealth/space-bunny-alpha", upstreamModel: "stealth/space-bunny-alpha", publicModel: "kilo/stealth/space-bunny-alpha", format: schemaFormat, stream: true, targetBudget: true},
 	}
 
 	for _, tc := range tests {

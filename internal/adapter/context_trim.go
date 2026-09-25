@@ -52,6 +52,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"dots-studio/dots-3-note-preview:free":               {ContextLimit: 512000, SafetyMargin: 40000, MaxInputTokens: 400000, DefaultOutputTokens: 8192, MaxOutputTokens: 256000},
 	"thinkingmachines/inkling-small:free":                {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 262144},
 	"thinkingmachines/inkling:free":                      {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 262144},
+	"stealth/space-bunny-alpha":                          {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000, DefaultOutputTokens: 8192, MaxOutputTokens: 524288},
 }
 
 func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrimStats, error) {
