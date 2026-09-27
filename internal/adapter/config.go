@@ -27,6 +27,7 @@ type Config struct {
 	KiloAutoRequestCompatEnabled bool
 	KiloAutoTelemetryEnabled     bool
 	TrustedNewAPIErrors          bool
+	ContextRecallConfigPath      string
 }
 
 func ConfigFromEnv() Config {
@@ -50,6 +51,7 @@ func ConfigFromEnv() Config {
 			false,
 		),
 		KiloAutoTelemetryEnabled: parseBool(os.Getenv("KILO_AUTO_TELEMETRY_ENABLED"), false),
+		ContextRecallConfigPath:  strings.TrimSpace(os.Getenv("CONTEXT_RECALL_CONFIG")),
 		TrustedNewAPIErrors: parseBool(
 			os.Getenv("TRUSTED_NEWAPI_ERROR_DIAGNOSTICS"),
 			false,

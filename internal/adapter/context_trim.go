@@ -55,7 +55,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"stealth/space-bunny-alpha":                          {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000, DefaultOutputTokens: 8192, MaxOutputTokens: 524288},
 }
 
-func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrimStats, error) {
+func trimFreeModelContext(body []byte, upstreamPath string, recall ...*contextRecallRequest) ([]byte, contextTrimStats, error) {
 	var stats contextTrimStats
 	var raw any
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -78,9 +78,9 @@ func trimFreeModelContext(body []byte, upstreamPath string) ([]byte, contextTrim
 	path := strings.TrimRight(strings.TrimSpace(upstreamPath), "/")
 	switch path {
 	case "/chat/completions", "/messages":
-		trimMessagePayload(payload, "messages", profile, false, &stats)
+		trimMessagePayload(payload, "messages", profile, false, &stats, recall...)
 	case "/responses":
-		trimResponsePayload(payload, profile, &stats)
+		trimResponsePayload(payload, profile, &stats, recall...)
 	default:
 		return body, stats, nil
 	}
@@ -146,9 +146,9 @@ func normalizeContextTrimProfile(profile contextTrimProfile) contextTrimProfile 
 	return profile
 }
 
-func trimResponsePayload(payload map[string]any, profile contextTrimProfile, stats *contextTrimStats) {
+func trimResponsePayload(payload map[string]any, profile contextTrimProfile, stats *contextTrimStats, recall ...*contextRecallRequest) {
 	if _, ok := payload["input"].([]any); ok {
-		trimMessagePayload(payload, "input", profile, true, stats)
+		trimMessagePayload(payload, "input", profile, true, stats, recall...)
 		return
 	}
 
@@ -171,7 +171,7 @@ func trimResponsePayload(payload map[string]any, profile contextTrimProfile, sta
 	stats.TruncatedItems++
 }
 
-func trimMessagePayload(payload map[string]any, field string, profile contextTrimProfile, responses bool, stats *contextTrimStats) {
+func trimMessagePayload(payload map[string]any, field string, profile contextTrimProfile, responses bool, stats *contextTrimStats, recall ...*contextRecallRequest) {
 	items, ok := payload[field].([]any)
 	if !ok || len(items) == 0 {
 		return
@@ -197,6 +197,13 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 
 	if contextEstimateItemsTokens(items) <= available {
 		return
+	}
+	if len(recall) > 0 && recall[0] != nil {
+		if kept, applied := recall[0].selectItems(payload, field, responses, available); applied {
+			payload[field] = kept
+			stats.TrimmedItems += len(items) - len(kept)
+			return
+		}
 	}
 
 	workingItems, ok := cloneContextJSONValue(items).([]any)

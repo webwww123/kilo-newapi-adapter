@@ -28,6 +28,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Bounded context recall integration
+        run: |
+          go test -tags recall_offline ./internal/adapter -run '^TestContextRecall' -count=1 -timeout=120s
+          go test -race -tags recall_offline ./internal/adapter -run '^TestContextRecallHTTPIntegration$' -count=1 -timeout=90s
+
       - name: Telemetry report tests
         run: python3 -B -m unittest discover -s scripts -p 'test_*.py'
 

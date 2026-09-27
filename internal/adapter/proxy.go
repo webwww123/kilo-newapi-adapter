@@ -33,10 +33,11 @@ var structuredJSONRetryBackoff = [...]time.Duration{time.Second}
 var kiloAutoRetryBackoff = [...]time.Duration{time.Second, 3 * time.Second}
 
 type Handler struct {
-	cfg         Config
-	logger      *requestLogger
-	retryWait   func(context.Context, time.Duration) error
-	retryJitter func(time.Duration) time.Duration
+	cfg           Config
+	logger        *requestLogger
+	retryWait     func(context.Context, time.Duration) error
+	retryJitter   func(time.Duration) time.Duration
+	contextRecall *contextRecallControl
 }
 
 func NewHandler(cfg Config) http.Handler {
@@ -67,10 +68,11 @@ func newBaseHandler(cfg Config) *Handler {
 		}
 	}
 	return &Handler{
-		cfg:         cfg,
-		logger:      logger,
-		retryWait:   waitForRetry,
-		retryJitter: defaultRetryJitter,
+		cfg:           cfg,
+		logger:        logger,
+		retryWait:     waitForRetry,
+		retryJitter:   defaultRetryJitter,
+		contextRecall: newContextRecallControl(cfg.ContextRecallConfigPath),
 	}
 }
 
@@ -79,8 +81,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusOK
 	bytesWritten := int64(0)
 	lw := &loggingResponseWriter{ResponseWriter: w, status: &status, bytesWritten: &bytesWritten}
+	var recall *contextRecallRequest
+	if r.Method == http.MethodPost {
+		recall = h.contextRecall.begin(r)
+		if recall != nil {
+			r = r.WithContext(context.WithValue(r.Context(), contextRecallRequestKey{}, recall))
+		}
+	}
 
 	defer func() {
+		recall.finish(status, time.Since(start))
 		if r.URL.Path != "/healthz" {
 			fmt.Printf("method=%s path=%s status=%d bytes=%d duration_ms=%d\n",
 				r.Method, r.URL.Path, status, bytesWritten, time.Since(start).Milliseconds())
@@ -328,7 +338,11 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		fmt.Printf("kilo_json_mode_downgrade path=%s model=%s mode=json_object\n", upstreamPath, stepfunFlashFreeModel)
 	}
 
-	body, trimStats, err := trimFreeModelContext(body, upstreamPath)
+	recall, _ := r.Context().Value(contextRecallRequestKey{}).(*contextRecallRequest)
+	if recall != nil {
+		recall.event.InputBytes = len(body)
+	}
+	body, trimStats, err := trimFreeModelContext(body, upstreamPath, recall)
 	if err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		h.recordRequest(start, r, upstreamPath, body, responseLogCapture{
