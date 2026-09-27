@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"sort"
 	"strings"
@@ -23,7 +24,8 @@ func newContextRecallEngine() *contextRecallEngine {
 
 type contextRecallTurn struct {
 	indexes []int
-	cost    int
+	owner   int
+	tool    bool
 	terms   map[string]int
 	length  int
 	score   float64
@@ -61,24 +63,19 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	if budget < 512 {
 		return nil, "fixed_fields_overflow"
 	}
-	if contextEstimateItemsTokens(items) <= budget {
+	costs := make([]int, len(items))
+	totalCost := 0
+	for i, item := range items {
+		if ctx.Err() != nil {
+			return nil, "deadline"
+		}
+		costs[i] = contextEstimateAnyTokens(item) + 4
+		totalCost += costs[i]
+	}
+	if totalCost <= budget {
 		return nil, "not_needed"
 	}
-	turns := []contextRecallTurn{}
-	anchors := []int{}
-	for i, item := range items {
-		role := contextItemRole(item)
-		if role == "system" || role == "developer" {
-			anchors = append(anchors, i)
-			continue
-		}
-		if len(turns) == 0 || contextRecallOrdinaryUser(item) {
-			turns = append(turns, contextRecallTurn{})
-		}
-		g := &turns[len(turns)-1]
-		g.indexes = append(g.indexes, i)
-		g.cost += contextEstimateAnyTokens(item) + 4
-	}
+	turns, anchors := contextRecallUnits(items)
 	if len(turns) == 0 {
 		return nil, "no_turns"
 	}
@@ -87,20 +84,27 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	used := 0
 	for _, i := range anchors {
 		selected[i] = true
-		used += contextEstimateAnyTokens(items[i]) + 4
+		used += costs[i]
 	}
 	add := func(i, limit int) bool {
-		if chosen[i] || used+turns[i].cost > limit {
+		additional := 0
+		for _, index := range turns[i].indexes {
+			if !selected[index] {
+				additional += costs[index]
+			}
+		}
+		if chosen[i] || used+additional > limit {
 			return false
 		}
 		for _, index := range turns[i].indexes {
 			selected[index] = true
 		}
 		chosen[i] = true
-		used += turns[i].cost
+		used += additional
 		return true
 	}
-	// Keep the current complete turn and preceding complete interaction intact.
+	// Keep the latest atomic interactions intact. A user task can contain many
+	// tool rounds; pinning that entire task would reject most agent histories.
 	for i := len(turns) - 1; i >= 0 && i >= len(turns)-2; i-- {
 		if !add(i, budget) {
 			return nil, "mandatory_turn_too_large"
@@ -157,6 +161,11 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		}
 		var text strings.Builder
 		for _, index := range turns[i].indexes {
+			// The owning task remains in the output for interpretation, but must
+			// not make every tool round match all of that task's query terms.
+			if turns[i].tool && index == turns[i].owner {
+				continue
+			}
 			text.WriteString(contextRecallText(items[index]))
 			text.WriteByte('\n')
 		}
@@ -228,6 +237,76 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	return kept, "selected"
 }
 
+func contextRecallUnits(items []any) ([]contextRecallTurn, []int) {
+	groups := completedContextToolGroupsBefore(items, len(items))
+	starts := make(map[int][]int)
+	members := make(map[int]bool)
+	for _, group := range groups {
+		if len(group.indexes) == 0 {
+			continue
+		}
+		indexes := make([]int, 0, len(group.indexes))
+		for _, index := range group.indexes {
+			// The Anthropic baseline helper can include the initiating user.
+			// Ownership is attached below, so the group must start at its call.
+			if !contextRecallOrdinaryUser(items[index]) {
+				indexes = append(indexes, index)
+			}
+		}
+		if len(indexes) == 0 {
+			continue
+		}
+		sort.Ints(indexes)
+		starts[indexes[0]] = indexes
+		for _, i := range indexes {
+			members[i] = true
+		}
+	}
+	var units []contextRecallTurn
+	var anchors, users []int
+	owner := -1
+	for i, item := range items {
+		role := contextItemRole(item)
+		if role == "system" || role == "developer" {
+			anchors = append(anchors, i)
+			continue
+		}
+		if contextRecallOrdinaryUser(item) {
+			owner = i
+			users = append(users, i)
+			units = append(units, contextRecallTurn{indexes: []int{i}, owner: i})
+			continue
+		}
+		if group, ok := starts[i]; ok {
+			if len(units) > 0 && len(units[len(units)-1].indexes) == 1 && units[len(units)-1].indexes[0] == owner && !units[len(units)-1].tool {
+				units[len(units)-1].indexes = append(units[len(units)-1].indexes, group...)
+				units[len(units)-1].tool = true
+			} else {
+				unit := contextRecallTurn{owner: owner, tool: true}
+				if owner >= 0 {
+					unit.indexes = append(unit.indexes, owner)
+				}
+				unit.indexes = append(unit.indexes, group...)
+				units = append(units, unit)
+			}
+			continue
+		}
+		if members[i] {
+			continue
+		}
+		if len(units) == 0 {
+			units = append(units, contextRecallTurn{owner: -1})
+		}
+		units[len(units)-1].indexes = append(units[len(units)-1].indexes, i)
+	}
+	// Keep the current and preceding task statements even when selection
+	// removes some completed tool rounds belonging to those tasks.
+	for i := len(users) - 1; i >= 0 && i >= len(users)-2; i-- {
+		anchors = append(anchors, users[i])
+	}
+	return units, anchors
+}
+
 func contextRecallOrdinaryUser(item any) bool {
 	m, _ := item.(map[string]any)
 	return contextItemRole(item) == "user" && len(contextAnthropicToolResultIDSet(m)) == 0
@@ -271,9 +350,17 @@ func contextRecallText(value any) string {
 		return b.String()
 	case map[string]any:
 		var b strings.Builder
-		for _, key := range []string{"content", "text", "output", "arguments"} {
+		for _, key := range []string{"content", "text", "output", "arguments", "tool_calls", "function", "name"} {
 			if item, ok := v[key]; ok {
 				b.WriteString(contextRecallText(item))
+				b.WriteByte('\n')
+			}
+		}
+		if input, ok := v["input"]; ok {
+			// Anthropic tool arguments are objects. File identifiers often exist
+			// only here, while the corresponding result contains file contents.
+			if encoded, err := json.Marshal(input); err == nil {
+				b.Write(encoded)
 				b.WriteByte('\n')
 			}
 		}

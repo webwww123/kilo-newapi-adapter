@@ -2,11 +2,17 @@
 
 The adapter can recover complete, relevant older turns before its existing
 context trim removes them. The existing model profile still decides the input
-budget. System/developer policies and the latest two complete turns stay intact;
+budget. System/developer policies, the latest task statements and the latest
+two complete interactions stay intact;
 message order, roles, tool call/result IDs and original text are preserved.
 This is lexical retrieval, not a larger model context window. Whole-history
-analysis, paraphrases without shared terms and oversized individual turns can
+analysis, paraphrases without shared terms and oversized individual messages can
 still lose information through the original trimming path.
+
+Tool-call/result groups form atomic selection units, carrying their originating
+user task for interpretation. Many tool rounds within one user task are not
+treated as one giant indivisible block. Tool arguments are searchable because
+file paths often appear only in the call, not in the returned file contents.
 
 The feature is off unless `CONTEXT_RECALL_CONFIG` names a local control file.
 The file contains `{"mode":"shadow","percent":5}` for observation or
