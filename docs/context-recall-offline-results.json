@@ -1,0 +1,173 @@
+{
+  "baseline_revision": "033517b6fed09378252968e6569674219f41cc8f",
+  "baseline_trim_sha256": "da0243984cfafa898b68aa2470a280fed96cfd54e1eb57ecc1a9fb31f0f036e9",
+  "fixture_sha256": "c07ead3f10d71b21cc1fdc5a21d4b047f6ea4feec44a9b80f920d680b7cc8334",
+  "cases": 81,
+  "scenario_count": 9,
+  "protocols": [
+    "chat",
+    "messages",
+    "responses"
+  ],
+  "input_budget_combinations": [
+    [
+      500000,
+      128000
+    ],
+    [
+      1000000,
+      128000
+    ],
+    [
+      1000000,
+      256000
+    ]
+  ],
+  "outcomes_by_evidence_count": {
+    "more": 39,
+    "same": 42
+  },
+  "candidate_reasons": {
+    "selected": 81
+  },
+  "input_estimate_range": [
+    507716,
+    1076264
+  ],
+  "input_byte_range": [
+    1014985,
+    2152013
+  ],
+  "case_additional_wall_ms": {
+    "median": 29.214855999999997,
+    "maximum": 50.752205999999994
+  },
+  "scenario_results": {
+    "old_named_file": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 0,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    },
+    "early_chinese_constraint": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 0,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    },
+    "historical_tool_result": {
+      "cases": 9,
+      "all_required_evidence_baseline": 9,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 9,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    },
+    "continue_previous_task": {
+      "cases": 9,
+      "all_required_evidence_baseline": 6,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 6,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    },
+    "corrected_decision": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 0,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    },
+    "semantic_paraphrase": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 0,
+      "required_evidence_total": 9,
+      "baseline_retained": 0,
+      "candidate_retained": 0,
+      "previously_retained_evidence_lost": 0
+    },
+    "keyword_distractors": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 3,
+      "required_evidence_total": 9,
+      "baseline_retained": 0,
+      "candidate_retained": 3,
+      "previously_retained_evidence_lost": 0
+    },
+    "whole_history_aggregate": {
+      "cases": 9,
+      "all_required_evidence_baseline": 0,
+      "all_required_evidence_candidate": 0,
+      "required_evidence_total": 864,
+      "baseline_retained": 177,
+      "candidate_retained": 180,
+      "previously_retained_evidence_lost": 112
+    },
+    "recent_control": {
+      "cases": 9,
+      "all_required_evidence_baseline": 6,
+      "all_required_evidence_candidate": 9,
+      "required_evidence_total": 9,
+      "baseline_retained": 6,
+      "candidate_retained": 9,
+      "previously_retained_evidence_lost": 0
+    }
+  },
+  "synthetic_only": true,
+  "model_calls": 0,
+  "production_changes": false,
+  "normal_build_excludes_experiment": true,
+  "retention_is_not_answer_accuracy": true,
+  "separate_process_performance": {
+    "baseline": {
+      "samples": 6,
+      "median_wall_ms": 12.229000500000001,
+      "median_cpu_ms": 12.191500000000005,
+      "median_allocated_mib": 2.666900634765625,
+      "address_space_peak_rss_mib": 20.87109375,
+      "address_space_final_rss_mib": 18.3671875,
+      "raw_rusage_maxrss_mib_not_used": 149.13671875,
+      "input_bytes": 2015740
+    },
+    "candidate": {
+      "samples": 6,
+      "median_wall_ms": 44.400202500000006,
+      "median_cpu_ms": 44.127999999999986,
+      "median_allocated_mib": 10.64581298828125,
+      "address_space_peak_rss_mib": 21.8671875,
+      "address_space_final_rss_mib": 21.1953125,
+      "raw_rusage_maxrss_mib_not_used": 149.0234375,
+      "input_bytes": 2015740
+    }
+  },
+  "memory_note": "VmHWM is the full test-process peak, not production incremental RAM. Allocated bytes are cumulative allocation, not peak live memory. Raw rusage substantially exceeded current-address-space VmHWM and was not used.",
+  "fallback_guard_subcases_passed": 32,
+  "active_context_structure_budget_checks_passed": 81,
+  "concurrency_probe": {
+    "jobs": 6,
+    "selected": 2,
+    "busy_immediate_fallback": 4,
+    "slots_released": true,
+    "race_detector_passed": true
+  },
+  "limitations": [
+    "Nine constructed scenario families repeated over protocols and sizes are not 81 independent customer tasks.",
+    "The selector retains complete turns only; huge current messages, tool outputs, images and unsupported/stateful structures use the old path.",
+    "Keyword matching did not recover cross-language paraphrases and only handled three of nine keyword-distractor combinations.",
+    "Whole-history cases retained 177 versus 180 of 864 evidence items; 112 previously kept items were replaced. More total retained items is not no regression.",
+    "No model answered these prompts. No customer traffic, peak production load, refunds or end-to-end task success were measured.",
+    "Deadline checks are cooperative and baseline fallback still costs CPU; they do not guarantee zero availability impact."
+  ]
+}
