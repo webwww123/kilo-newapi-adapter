@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -14,14 +15,15 @@ import (
 
 // Test-only prototype: no production request path can reference this code.
 type recallExperiment struct {
-	slots    chan struct{}
-	maxBytes int
-	maxItems int
-	timeout  time.Duration
+	slots        chan struct{}
+	maxBytes     int
+	maxItems     int
+	timeout      time.Duration
+	conservative bool
 }
 
 func newRecallExperiment() *recallExperiment {
-	return &recallExperiment{slots: make(chan struct{}, 2), maxBytes: 12 << 20, maxItems: 4096, timeout: 250 * time.Millisecond}
+	return &recallExperiment{slots: make(chan struct{}, 2), maxBytes: 12 << 20, maxItems: 4096, timeout: 250 * time.Millisecond, conservative: os.Getenv("RECALL_CONSERVATIVE") == "1"}
 }
 
 type recallTurn struct {
@@ -117,12 +119,25 @@ func (r *recallExperiment) choose(ctx context.Context, payload map[string]any, p
 	}
 	query := make(map[string]int)
 	userTurns := 0
-	for i := len(items) - 1; i >= 0 && userTurns < 6; i-- {
+	queryTurnLimit := 6
+	if r.conservative {
+		queryTurnLimit = 1
+	}
+	for i := len(items) - 1; i >= 0 && userTurns < queryTurnLimit; i-- {
 		if !recallOrdinaryUser(items[i]) {
 			continue
 		}
 		userTurns++
 		text := recallText(items[i])
+		if r.conservative && userTurns == 1 {
+			if recallBroadQuery(text) {
+				return nil, "broad_query"
+			}
+			lower := strings.ToLower(strings.TrimSpace(text))
+			if strings.HasPrefix(lower, "继续") || strings.HasPrefix(lower, "continue") || strings.HasPrefix(lower, "go on") || strings.HasPrefix(lower, "proceed") {
+				queryTurnLimit = 6
+			}
+		}
 		if len(text) > 8192 {
 			text = text[:4096] + " " + text[len(text)-4096:]
 		}
@@ -153,7 +168,14 @@ func (r *recallExperiment) choose(ctx context.Context, payload map[string]any, p
 			text.WriteString(recallText(items[index]))
 			text.WriteByte('\n')
 		}
-		terms, length, ok := recallTerms(ctx, text.String())
+		var terms map[string]int
+		var length int
+		var ok bool
+		if r.conservative {
+			terms, length, ok = recallMatchingTerms(ctx, text.String(), query)
+		} else {
+			terms, length, ok = recallTerms(ctx, text.String())
+		}
 		if !ok {
 			return nil, "deadline"
 		}
@@ -167,14 +189,18 @@ func (r *recallExperiment) choose(ctx context.Context, payload map[string]any, p
 	}
 	avg := math.Max(1, float64(totalLength)/float64(len(turns)))
 	ranked := make([]int, 0, len(turns))
+	hasPriorEvidence := false
 	for i := range turns {
 		if ctx.Err() != nil {
 			return nil, "deadline"
 		}
-		if chosen[i] {
+		if chosen[i] && !r.conservative {
 			continue
 		}
 		for _, term := range queryTerms {
+			if r.conservative && df[term]*3 >= len(turns) {
+				continue
+			}
 			tf := float64(turns[i].terms[term])
 			if tf == 0 {
 				continue
@@ -182,9 +208,15 @@ func (r *recallExperiment) choose(ctx context.Context, payload map[string]any, p
 			idf := math.Log(1 + (float64(len(turns)-df[term])+0.5)/(float64(df[term])+0.5))
 			turns[i].score += idf * tf * 2.2 / (tf + 1.2*(0.25+0.75*float64(turns[i].length)/avg))
 		}
-		if turns[i].score > 0 {
+		if turns[i].score > 0 && i < len(turns)-1 {
+			hasPriorEvidence = true
+		}
+		if turns[i].score > 0 && !chosen[i] {
 			ranked = append(ranked, i)
 		}
+	}
+	if r.conservative && !hasPriorEvidence {
+		return nil, "no_recall_evidence"
 	}
 	sort.SliceStable(ranked, func(a, b int) bool {
 		i, j := ranked[a], ranked[b]
@@ -269,6 +301,12 @@ func recallText(value any) string {
 }
 
 func recallTerms(ctx context.Context, text string) (map[string]int, int, bool) {
+	return recallMatchingTerms(ctx, text, nil)
+}
+
+// Count all term positions for BM25 normalization, but retain only query terms.
+// This bounds index memory by the query rather than by input vocabulary size.
+func recallMatchingTerms(ctx context.Context, text string, query map[string]int) (map[string]int, int, bool) {
 	terms := make(map[string]int)
 	length := 0
 	var word strings.Builder
@@ -277,7 +315,9 @@ func recallTerms(ctx context.Context, text string) (map[string]int, int, bool) {
 		term := strings.Trim(word.String(), "._/-")
 		word.Reset()
 		if len(term) >= 3 {
-			terms[term]++
+			if query == nil || query[term] > 0 {
+				terms[term]++
+			}
 			length++
 		}
 	}
@@ -297,7 +337,10 @@ func recallTerms(ctx context.Context, text string) (map[string]int, int, bool) {
 		flush()
 		if unicode.Is(unicode.Han, char) {
 			if previousHan != 0 {
-				terms[string([]rune{previousHan, char})]++
+				term := string([]rune{previousHan, char})
+				if query == nil || query[term] > 0 {
+					terms[term]++
+				}
 				length++
 			}
 			previousHan = char
@@ -307,6 +350,16 @@ func recallTerms(ctx context.Context, text string) (map[string]int, int, bool) {
 	}
 	flush()
 	return terms, length, ctx.Err() == nil
+}
+
+func recallBroadQuery(text string) bool {
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{"every ", "all records", "all available", "entire history", "complete conversation", "whole conversation", "whole document", "summarize", "summarise", "全文", "所有记录", "所有材料", "全部记录", "逐一", "汇总", "总结"} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func runRecallExperiment(ctx context.Context, raw []byte, protocol string, profile contextTrimProfile, candidate *recallExperiment) ([]byte, string, error) {
