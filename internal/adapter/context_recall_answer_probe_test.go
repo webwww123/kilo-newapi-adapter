@@ -50,6 +50,13 @@ func TestRecallAnswerProbeExport(t *testing.T) {
 		profile := recallProfile(fixture.Payload, "chat", 128000)
 		raw := recallJSON(t, fixture.Payload)
 		row := map[string]any{"scenario": scenario, "expected": want[scenario], "source_bytes": len(raw), "budget": 128000, "arms": map[string]any{}}
+		if os.Getenv("RECALL_EXPORT_RAW") == "1" {
+			name := scenario + "-source.json"
+			if err := os.WriteFile(filepath.Join(dir, name), raw, 0600); err != nil {
+				t.Fatal(err)
+			}
+			row["source_file"] = name
+		}
 		for _, arm := range []string{"baseline", "candidate"} {
 			var candidate *recallExperiment
 			if arm == "candidate" {
