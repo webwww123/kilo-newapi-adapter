@@ -15,7 +15,7 @@ def source(name):
     return subprocess.check_output(['git', 'show', REVISION + ':internal/adapter/' + name], cwd=REPO, text=True)
 
 
-def build(destination):
+def build(destination, local_estimator=False):
     original = {name: source(name) for name in ('context_recall.go', 'context_recall_control.go', 'context_trim.go')}
     core = original['context_recall.go'].replace('package adapter', 'package contextrecall', 1)
     helper = original['context_trim.go']
@@ -61,6 +61,32 @@ func FromContext(ctx context.Context) *Request {
     return q
 }
 '''
+    if local_estimator:
+        core = core.replace('type contextRecallEngine struct {', 'type contextRecallEngine struct {\n estimate func(any) int')
+        core = core.replace('costs[i] = contextEstimateAnyTokens(item) + 4', 'costs[i] = r.estimateItem(item) + 4')
+        core = core.replace('if contextEstimateItemsTokens(kept) > budget', 'if r.estimateItems(kept) > budget')
+        core += '''
+// Preserve the host middleware's existing token estimator and input budget.
+func (r *contextRecallEngine) estimateItem(item any) int {
+    if r.estimate != nil { return r.estimate(item) }
+    return contextEstimateAnyTokens(item)
+}
+func (r *contextRecallEngine) estimateItems(items []any) int {
+    total := 0
+    for _, item := range items { total += r.estimateItem(item) + 4 }
+    return total
+}
+'''
+        control += '''
+func NewControlWithEstimator(path string, estimate func(any) int) *Control {
+    c := NewControl(path)
+    if c == nil { return nil }
+    engine := *c.engine
+    engine.estimate = estimate
+    c.engine = &engine // The process-wide non-queueing slot channel stays shared.
+    return c
+}
+'''
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     manifest_path = destination / 'provenance.json'
@@ -77,7 +103,7 @@ func FromContext(ctx context.Context) *Request {
             raise ValueError('refusing to overwrite existing vendored source')
         target.write_text(header + value)
         subprocess.run(['gofmt', '-w', str(target)], check=True)
-    manifest = {'revision': REVISION, 'source_sha256': {k: hashlib.sha256(v.encode()).hexdigest() for k,v in original.items()},
+    manifest = {'revision': REVISION, 'local_estimator':local_estimator, 'source_sha256': {k: hashlib.sha256(v.encode()).hexdigest() for k,v in original.items()},
                 'output_sha256': {name: hashlib.sha256((destination/name).read_bytes()).hexdigest()
                                   for name in ('selector.go', 'control.go', 'safety.go')}}
     manifest_path.write_text(json.dumps(manifest, indent=2)+'\n')
@@ -87,4 +113,6 @@ func FromContext(ctx context.Context) *Request {
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('destination')
-    build(parser.parse_args().destination)
+    parser.add_argument('--local-estimator', action='store_true')
+    args = parser.parse_args()
+    build(args.destination, args.local_estimator)
