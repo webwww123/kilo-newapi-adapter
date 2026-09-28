@@ -8,7 +8,7 @@ import re
 import subprocess
 
 REPO = Path(__file__).resolve().parents[1]
-REVISION = '93198ba7b1d6c9c2e82561631c64d20af620ed7d'
+REVISION = '7dc2d19b4d1fc2ca2a2078868cfc5d2c36379acb'
 
 
 def source(name):
