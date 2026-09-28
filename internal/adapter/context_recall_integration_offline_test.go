@@ -60,6 +60,57 @@ func TestContextRecallProductionSelection(t *testing.T) {
 	}
 }
 
+func TestContextRecallRecentAndOldShareGuard(t *testing.T) {
+	f := makeRecallFixture("old_named_file", "chat", 1000000)
+	items := f.Payload["messages"].([]any)
+	const budget = 200000
+	working, _ := cloneContextJSONValue(items).([]any)
+	baseline := selectContextItemsForBudget(working, budget)
+	if bytes.Contains(recallJSON(t, baseline), []byte("orbit-47")) {
+		t.Fatal("fixture baseline already contains recalled fact")
+	}
+	kept, reason := newContextRecallEngine().choose(context.Background(), f.Payload, "chat", len(recallJSON(t, f.Payload)), budget, baseline)
+	if reason != "selected" || !bytes.Contains(recallJSON(t, kept), []byte("orbit-47")) {
+		t.Fatalf("bounded old evidence was not recalled: %s", reason)
+	}
+	counts := make(map[string]int, len(kept))
+	for _, item := range kept {
+		counts[string(recallJSON(t, item))]++
+	}
+	for _, item := range baseline {
+		counts[string(recallJSON(t, item))]--
+	}
+	added := 0
+	for _, item := range items {
+		key := string(recallJSON(t, item))
+		if counts[key] > 0 {
+			counts[key]--
+			added += contextEstimateAnyTokens(item) + 4
+		}
+	}
+	_, anchors := contextRecallUnits(items)
+	anchorCost := 0
+	for _, index := range anchors {
+		anchorCost += contextEstimateAnyTokens(items[index]) + 4
+	}
+	if added > (budget-anchorCost)/5 {
+		t.Fatalf("old additions exceeded one fifth: added=%d cap=%d", added, (budget-anchorCost)/5)
+	}
+	for _, recent := range items[len(items)-10:] {
+		key := string(recallJSON(t, recent))
+		found := false
+		for _, item := range kept {
+			if string(recallJSON(t, item)) == key {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatal("recent source item was displaced")
+		}
+	}
+}
+
 func TestContextRecallHTTPIntegration(t *testing.T) {
 	for _, protocol := range []string{"chat", "messages", "responses"} {
 		path := map[string]string{"chat": "/v1/chat/completions", "messages": "/v1/messages", "responses": "/v1/responses"}[protocol]
@@ -107,7 +158,7 @@ func TestContextRecallHTTPIntegration(t *testing.T) {
 			}
 			if mode == "apply" {
 				if !events[0].Applied || !bytes.Contains(forwarded, []byte("orbit-47")) || bytes.Contains(legacy, []byte("orbit-47")) {
-					t.Fatalf("real pipeline failed to recover old fact: %s", protocol)
+					t.Fatalf("real pipeline failed to recover old fact: %s event=%+v", protocol, events[0])
 				}
 				var a, b map[string]any
 				_ = json.Unmarshal(legacy, &a)

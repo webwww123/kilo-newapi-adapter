@@ -198,14 +198,6 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	if contextEstimateItemsTokens(items) <= available {
 		return
 	}
-	if len(recall) > 0 && recall[0] != nil {
-		if kept, applied := recall[0].selectItems(payload, field, responses, available); applied {
-			payload[field] = kept
-			stats.TrimmedItems += len(items) - len(kept)
-			return
-		}
-	}
-
 	workingItems, ok := cloneContextJSONValue(items).([]any)
 	if !ok {
 		return
@@ -220,6 +212,11 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	}
 	if contextEstimateItemsTokens(kept) > available {
 		return
+	}
+	if len(recall) > 0 && recall[0] != nil && trimStats.TruncatedItems == 0 {
+		if candidate, applied := recall[0].selectItems(payload, field, responses, available, kept); applied {
+			kept = candidate
+		}
 	}
 	if len(kept) < len(items) {
 		trimStats.TrimmedItems += len(items) - len(kept)

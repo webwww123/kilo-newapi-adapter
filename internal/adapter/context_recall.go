@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -31,7 +32,7 @@ type contextRecallTurn struct {
 	score   float64
 }
 
-func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any, protocol string, rawBytes, budget int) ([]any, string) {
+func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any, protocol string, rawBytes, budget int, baseline ...[]any) ([]any, string) {
 	if rawBytes > r.maxBytes {
 		return nil, "size_limit"
 	}
@@ -79,6 +80,20 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	if len(turns) == 0 {
 		return nil, "no_turns"
 	}
+	if len(baseline) != 1 {
+		return nil, "baseline_missing"
+	}
+	baselineMask := make([]bool, len(items))
+	baselineAt := 0
+	for i, item := range items {
+		if baselineAt < len(baseline[0]) && reflect.DeepEqual(item, baseline[0][baselineAt]) {
+			baselineMask[i] = true
+			baselineAt++
+		}
+	}
+	if baselineAt != len(baseline[0]) {
+		return nil, "baseline_invalid"
+	}
 	selected := make([]bool, len(items))
 	chosen := make([]bool, len(turns))
 	used := 0
@@ -86,6 +101,9 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		selected[i] = true
 		used += costs[i]
 	}
+	// Fixed instructions and task statements are not discretionary history.
+	// Older evidence may use at most one fifth of the remaining capacity.
+	oldAllowance := (budget - used) / 5
 	add := func(i, limit int) bool {
 		additional := 0
 		for _, index := range turns[i].indexes {
@@ -103,18 +121,42 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		used += additional
 		return true
 	}
-	// Keep the latest atomic interactions intact. A user task can contain many
-	// tool rounds; pinning that entire task would reject most agent histories.
-	for i := len(turns) - 1; i >= 0 && i >= len(turns)-2; i-- {
-		if !add(i, budget) {
+	// Protect the last ten source items, expanded to complete atomic units and
+	// their owning task. Never split a recent tool call/result to recall history.
+	for i := len(turns) - 1; i >= 0; i-- {
+		required := i >= len(turns)-2
+		for _, index := range turns[i].indexes {
+			required = required || index >= len(items)-10
+		}
+		if required && !add(i, budget) {
 			return nil, "mandatory_turn_too_large"
 		}
 	}
 	if used > budget {
 		return nil, "mandatory_turn_too_large"
 	}
+	recentLimit := budget - oldAllowance
+	if used > recentLimit {
+		recentLimit = used
+	}
+	baselineUnit := func(i int) bool {
+		if len(turns[i].indexes) == 0 {
+			return false
+		}
+		for _, index := range turns[i].indexes {
+			if !baselineMask[index] {
+				return false
+			}
+		}
+		return true
+	}
 	for i := len(turns) - 1; i >= 0; i-- {
-		add(i, budget*3/4)
+		if chosen[i] || !baselineUnit(i) {
+			continue
+		}
+		if !add(i, recentLimit) {
+			break
+		}
 	}
 	query := make(map[string]int)
 	userTurns := 0
@@ -216,11 +258,36 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		}
 		return turns[i].score > turns[j].score
 	})
-	for _, i := range ranked {
-		add(i, budget)
+	cutoff := len(items) - 10
+	if cutoff < 0 {
+		cutoff = 0
 	}
+	oldAdded := 0
+	recalled := false
+	for _, i := range ranked {
+		addition := 0
+		for _, index := range turns[i].indexes {
+			if !selected[index] && !baselineMask[index] && index < cutoff {
+				addition += costs[index]
+			}
+		}
+		if addition == 0 || oldAdded+addition > oldAllowance {
+			continue
+		}
+		if add(i, budget) {
+			oldAdded += addition
+			recalled = true
+		}
+	}
+	if !recalled {
+		return nil, "no_older_evidence"
+	}
+	// Spend any remaining space on items already chosen by the legacy trim,
+	// newest first. Recall never displaces the protected recent suffix.
 	for i := len(turns) - 1; i >= 0; i-- {
-		add(i, budget)
+		if !chosen[i] && baselineUnit(i) {
+			add(i, budget)
+		}
 	}
 	if ctx.Err() != nil {
 		return nil, "deadline"
@@ -233,6 +300,21 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	}
 	if contextEstimateItemsTokens(kept) > budget || !contextToolHistorySafeToTrim(kept) || (protocol == "responses" && !contextResponsesItemsSafeToTrim(kept)) {
 		return nil, "candidate_invalid"
+	}
+	actualOldAdded := 0
+	for i := range items {
+		if baselineMask[i] && i >= cutoff && !selected[i] {
+			return nil, "recent_guard_lost"
+		}
+		if selected[i] && !baselineMask[i] && i < cutoff {
+			actualOldAdded += costs[i]
+		}
+	}
+	if actualOldAdded == 0 {
+		return nil, "no_older_evidence"
+	}
+	if actualOldAdded > oldAllowance {
+		return nil, "old_share_limit"
 	}
 	return kept, "selected"
 }

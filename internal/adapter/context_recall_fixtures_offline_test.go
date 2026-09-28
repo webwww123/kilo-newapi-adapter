@@ -54,21 +54,21 @@ func makeRecallFixture(scenario, protocol string, target int) recallFixture {
 		case "old_named_file":
 			if n == 3 {
 				fact := "db/replay_worker.go uses checkpoint key orbit-47."
-				text = fact + "\n" + text
+				text = fact + strings.Repeat(" replay checkpoint detail", 1000)
 				evidence = append(evidence, fact)
 			}
 		case "early_chinese_constraint":
 			question = "继续修改退款任务，遵守最早对幂等校验的约定。"
 			if n == 4 {
 				fact := "项目约定：退款任务必须保留原来的幂等校验，验收码 refund-keep-812。"
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 		case "continue_previous_task":
 			question = "继续。"
 			if n == 12 {
 				fact := "db/replay_worker.go uses checkpoint key luna-83."
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 			if n == turns-2 {
@@ -81,21 +81,21 @@ func makeRecallFixture(scenario, protocol string, target int) recallFixture {
 			}
 			if n == 46 {
 				fact := "gateway/session.go final correction: timeout is 1700 ms; the earlier 900 ms proposal is withdrawn."
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 		case "semantic_paraphrase":
 			question = "Maintain financial integrity while changing the reconciliation service."
 			if n == 3 {
 				fact := "账册只许追加，严禁覆盖旧凭据；验收约定为账本八三七。"
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 		case "keyword_distractors":
 			question = "Investigate mesh_probe.go socket timeout and retry policy."
 			if n == 3 {
 				fact := "mesh_probe.go socket timeout evidence: retry is forbidden after state checkpoint cedar-29."
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			} else if n > 8 {
 				text = strings.Repeat("mesh_probe.go socket timeout retry policy background note without the actual decision. ", 18) + text
@@ -109,7 +109,7 @@ func makeRecallFixture(scenario, protocol string, target int) recallFixture {
 			question = "按照最新报告继续检查 sensor_recent.go，保留最新校准数值。"
 			if n == turns-1 {
 				fact := "sensor_recent.go current calibration is cyan-615."
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 		}
@@ -123,7 +123,7 @@ func makeRecallFixture(scenario, protocol string, target int) recallFixture {
 			if scenario == "historical_tool_result" && n == 30 {
 				path = "shard/lease_clock.go"
 				fact := "shard/lease_clock.go lease TTL is 413 seconds, measured at marker nickel-72."
-				text = fact + "\n" + text
+				text = fact
 				evidence = append(evidence, fact)
 			}
 			items = append(items, recallToolTurn(fmt.Sprintf("call_note_%03d", n), path, text)...)

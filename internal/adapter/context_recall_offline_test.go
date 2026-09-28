@@ -350,7 +350,9 @@ func TestRecallOfflineConcurrencyAndDeterminism(t *testing.T) {
 	f := makeRecallFixture("old_named_file", "chat", 1000000)
 	raw := recallJSON(t, f.Payload)
 	p := decodeRecall(t, raw)
-	engine := newRecallExperiment()
+	working, _ := cloneContextJSONValue(p["messages"]).([]any)
+	baseline := selectContextItemsForBudget(working, 128000)
+	engine := newContextRecallEngine()
 	engine.timeout = 2 * time.Second // Race instrumentation is not a latency benchmark.
 	const jobs = 6
 	start := make(chan struct{})
@@ -365,7 +367,7 @@ func TestRecallOfflineConcurrencyAndDeterminism(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000)
+			out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, baseline)
 			results <- result{out, why}
 		}()
 	}
@@ -398,7 +400,7 @@ func TestRecallOfflineConcurrencyAndDeterminism(t *testing.T) {
 		t.Fatal("recall slot leaked")
 	}
 	for i := 0; i < 3; i++ {
-		out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000)
+		out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, baseline)
 		if why != "selected" || !bytes.Equal(reference, recallJSON(t, out)) {
 			t.Fatal("repeated selection changed")
 		}

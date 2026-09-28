@@ -125,7 +125,7 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	return q
 }
 
-func (q *contextRecallRequest) selectItems(payload map[string]any, field string, responses bool, budget int) (kept []any, applied bool) {
+func (q *contextRecallRequest) selectItems(payload map[string]any, field string, responses bool, budget int, baseline ...[]any) (kept []any, applied bool) {
 	if q == nil {
 		return nil, false
 	}
@@ -139,6 +139,10 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 		q.event.Reason = "control"
 		return nil, false
 	}
+	if len(baseline) != 1 {
+		q.event.Reason = "baseline_missing"
+		return nil, false
+	}
 	started := time.Now()
 	defer func() {
 		q.event.SelectMS = time.Since(started).Milliseconds()
@@ -149,7 +153,7 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 			q.event.Reason = "internal_fallback"
 		}
 	}()
-	kept, q.event.Reason = q.control.engine.choose(q.ctx, payload, q.event.Protocol, q.event.InputBytes, budget)
+	kept, q.event.Reason = q.control.engine.choose(q.ctx, payload, q.event.Protocol, q.event.InputBytes, budget, baseline...)
 	if q.event.Reason != "selected" {
 		return nil, false
 	}
