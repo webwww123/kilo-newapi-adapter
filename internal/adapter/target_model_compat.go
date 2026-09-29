@@ -23,6 +23,7 @@ type targetModelCompatStats struct {
 	OutputBudgetNormalized     bool
 	ReasoningNormalized        bool
 	ForcedToolChoiceNormalized bool
+	DeferredToolsExpanded      int
 }
 
 func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, targetModelCompatStats, error) {
@@ -70,8 +71,11 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	if model == tencentHY3FreeModel && path == "/chat/completions" && normalizeHY3ForcedFunctionChoice(payload) {
 		stats.ForcedToolChoiceNormalized = true
 	}
+	if model == spaceBunnyAlphaModel && path == "/messages" {
+		stats.DeferredToolsExpanded = normalizeSpaceBunnyDeferredTools(payload)
+	}
 
-	stats.Changed = stats.OutputBudgetNormalized || stats.ReasoningNormalized || stats.ForcedToolChoiceNormalized
+	stats.Changed = stats.OutputBudgetNormalized || stats.ReasoningNormalized || stats.ForcedToolChoiceNormalized || stats.DeferredToolsExpanded > 0
 	if !stats.Changed {
 		return body, stats, nil
 	}
