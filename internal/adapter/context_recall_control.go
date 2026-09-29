@@ -18,8 +18,9 @@ import (
 // Optional local control file; absent, invalid, oversized or disabled means
 // exact legacy trimming. Updating this file never restarts a live service.
 type contextRecallPolicy struct {
-	Mode    string `json:"mode"`
-	Percent int    `json:"percent"`
+	Mode            string `json:"mode"`
+	Percent         int    `json:"percent"`
+	FragmentPercent int    `json:"fragment_percent"`
 }
 
 type contextRecallControl struct {
@@ -32,31 +33,34 @@ type contextRecallControl struct {
 }
 
 type contextRecallEvent struct {
-	Version        int    `json:"version"`
-	Timestamp      string `json:"timestamp"`
-	RequestHash    string `json:"request_hash,omitempty"`
-	Protocol       string `json:"protocol"`
-	Mode           string `json:"mode"`
-	Percent        int    `json:"percent"`
-	Reason         string `json:"reason"`
-	Applied        bool   `json:"applied"`
-	InputBytes     int    `json:"input_bytes"`
-	InputItems     int    `json:"input_items"`
-	CandidateItems int    `json:"candidate_items,omitempty"`
-	Budget         int    `json:"budget"`
-	SelectMS       int64  `json:"select_ms"`
-	Status         int    `json:"status"`
-	DurationMS     int64  `json:"duration_ms"`
+	Kind            string `json:"kind,omitempty"`
+	FragmentPercent int    `json:"fragment_percent,omitempty"`
+	Version         int    `json:"version"`
+	Timestamp       string `json:"timestamp"`
+	RequestHash     string `json:"request_hash,omitempty"`
+	Protocol        string `json:"protocol"`
+	Mode            string `json:"mode"`
+	Percent         int    `json:"percent"`
+	Reason          string `json:"reason"`
+	Applied         bool   `json:"applied"`
+	InputBytes      int    `json:"input_bytes"`
+	InputItems      int    `json:"input_items"`
+	CandidateItems  int    `json:"candidate_items,omitempty"`
+	Budget          int    `json:"budget"`
+	SelectMS        int64  `json:"select_ms"`
+	Status          int    `json:"status"`
+	DurationMS      int64  `json:"duration_ms"`
 }
 
 type contextRecallRequestKey struct{}
 
 type contextRecallRequest struct {
-	control   *contextRecallControl
-	ctx       context.Context
-	event     contextRecallEvent
-	triggered bool
-	chosen    bool
+	control        *contextRecallControl
+	ctx            context.Context
+	event          contextRecallEvent
+	triggered      bool
+	chosen         bool
+	fragmentChosen bool
 }
 
 func newContextRecallControl(path string) *contextRecallControl {
@@ -90,7 +94,7 @@ func (c *contextRecallControl) current() contextRecallPolicy {
 				}
 				_ = file.Close()
 			}
-			if (p.Mode != "shadow" && p.Mode != "apply") || p.Percent < 0 || p.Percent > 100 {
+			if (p.Mode != "shadow" && p.Mode != "apply") || p.Percent < 0 || p.Percent > 100 || p.FragmentPercent < 0 || p.FragmentPercent > 100 {
 				p = contextRecallPolicy{}
 			}
 			c.policy.Store(&p)
@@ -105,11 +109,12 @@ func (c *contextRecallControl) current() contextRecallPolicy {
 
 func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	p := c.current()
-	if p.Percent == 0 {
+	if p.Percent == 0 && p.FragmentPercent == 0 {
 		return nil
 	}
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
-		event: contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent}}
+		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
+		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent}}
 	switch normalizePath(r.URL.Path) {
 	case "/messages":
 		q.event.Protocol = "messages"

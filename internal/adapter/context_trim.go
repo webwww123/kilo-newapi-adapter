@@ -167,7 +167,13 @@ func trimResponsePayload(payload map[string]any, profile contextTrimProfile, sta
 	if contextEstimateStringTokens(input) <= available {
 		return
 	}
-	payload["input"] = trimStringPreservingEdgesToContextBudget(input, available)
+	baseline := trimStringPreservingEdgesToContextBudget(input, available)
+	payload["input"] = baseline
+	if len(recall) > 0 && recall[0] != nil {
+		if text, applied := recall[0].selectText(input, baseline); applied && contextEstimateStringTokens(text) <= available {
+			payload["input"] = text
+		}
+	}
 	stats.TruncatedItems++
 }
 
@@ -213,9 +219,15 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	if contextEstimateItemsTokens(kept) > available {
 		return
 	}
-	if len(recall) > 0 && recall[0] != nil && trimStats.TruncatedItems == 0 {
-		if candidate, applied := recall[0].selectItems(payload, field, responses, available, kept); applied {
-			kept = candidate
+	if len(recall) > 0 && recall[0] != nil {
+		if trimStats.TruncatedItems == 0 {
+			if candidate, applied := recall[0].selectItems(payload, field, responses, available, kept); applied {
+				kept = candidate
+			}
+		} else {
+			if candidate, applied := recall[0].selectTextItems(payload, field, kept); applied && contextEstimateItemsTokens(candidate) <= available {
+				kept = candidate
+			}
 		}
 	}
 	if len(kept) < len(items) {
