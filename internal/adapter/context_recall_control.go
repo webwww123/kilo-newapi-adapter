@@ -118,7 +118,12 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	default:
 		q.event.Protocol = "chat"
 	}
-	if id := r.Header.Get("X-Request-Id"); id != "" && len(id) <= 1024 {
+	// Prefer the platform logical ID over an adapter's physical attempt ID.
+	id := r.Header.Get("X-Oneapi-Request-Id")
+	if id == "" {
+		id = r.Header.Get("X-Request-Id")
+	}
+	if id != "" && len(id) <= 1024 {
 		digest := sha256.Sum256([]byte(id))
 		q.event.RequestHash = hex.EncodeToString(digest[:16])
 	}

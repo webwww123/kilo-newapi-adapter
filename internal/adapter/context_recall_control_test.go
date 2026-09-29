@@ -1,6 +1,8 @@
 package adapter
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -8,6 +10,35 @@ import (
 	"testing"
 	"time"
 )
+
+func TestContextRecallPrefersPlatformRequestID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "recall.json")
+	if err := os.WriteFile(path, []byte(`{"mode":"apply","percent":100}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := newContextRecallControl(path)
+	for _, row := range []struct{ platform, physical, want string }{
+		{"logical-123", "attempt-456", "logical-123"},
+		{"", "attempt-456", "attempt-456"},
+		{"", "", ""},
+		{strings.Repeat("x", 1025), "attempt-456", ""},
+	} {
+		r := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+		r.Header.Set("X-Oneapi-Request-Id", row.platform)
+		r.Header.Set("X-Request-Id", row.physical)
+		want := ""
+		if row.want != "" {
+			digest := sha256.Sum256([]byte(row.want))
+			want = hex.EncodeToString(digest[:16])
+		}
+		if q := c.begin(r); q == nil || q.event.RequestHash != want {
+			t.Fatal("logical request correlation mismatch")
+		}
+		if r.Header.Get("X-Oneapi-Request-Id") != row.platform || r.Header.Get("X-Request-Id") != row.physical {
+			t.Fatal("telemetry mutated routing headers")
+		}
+	}
+}
 
 func TestContextRecallControlReloadAndFailOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "recall.json")
