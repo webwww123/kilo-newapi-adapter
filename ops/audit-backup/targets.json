@@ -1,0 +1,18 @@
+{
+  "source_node": "119",
+  "local_root": "/opt/backups/audit-core",
+  "remote": {"host": "50", "root": "/opt/backup-archive/node119/audit-core"},
+  "retention_days": 7,
+  "minimum_free_bytes": 10737418240,
+  "targets": [
+    {"id": "redeem", "kind": "sqlite", "source": "/root/.gemini/antigravity/xiaoen-redeem-go/redeem.db", "tables": ["redeem_codes", "card_presets", "center_members", "center_orders", "model_entitlements"], "timeout_seconds": 600},
+    {"id": "dujiao", "kind": "sqlite", "source": "/opt/dujiao-next/data/db/dujiao.db", "tables": ["orders", "order_items", "card_secrets", "payments", "wallet_transactions"], "timeout_seconds": 600},
+    {"id": "99code", "kind": "mysql", "container": "99code-mysql", "database": "newapi_523", "timeout_seconds": 900},
+    {"id": "tagi", "kind": "sqlite", "source": "/opt/tagiapi-data/site.sqlite", "tables": ["accounts", "orders", "redeemed", "api_keys", "usage"], "timeout_seconds": 600},
+    {"id": "weiwan", "kind": "sqlite", "source": "/var/lib/weiwan-hub/site.sqlite", "tables": ["accounts", "orders", "redeemed", "api_keys", "usage"], "timeout_seconds": 600},
+    {"id": "monitor", "kind": "sqlite", "source": "/root/.gemini/antigravity/newapi-monitor-go/monitor.db", "tables": ["channels", "channel_logs", "disable_history", "config"], "timeout_seconds": 600},
+    {"id": "mailflow", "kind": "postgres", "container": "mailflow-postgres", "database": "mailflow", "timeout_seconds": 180},
+    {"id": "xiaoenai", "kind": "existing_mysql", "source_dir": "/opt/xiaoenai-backups/mysql", "max_age_hours": 48, "timeout_seconds": 600}
+  ],
+  "gaps": [{"id": "frequency", "reason": "no_identified_live_database"}]
+}

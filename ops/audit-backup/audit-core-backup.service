@@ -1,0 +1,21 @@
+[Unit]
+Description=Verified business database backup and SSH replica
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/lib/audit-core-backup/targets.json
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/audit-core-backup/backup.py --apply --replicate
+TimeoutStartSec=7200
+Nice=19
+IOSchedulingClass=idle
+MemoryMax=512M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/backups/audit-core /run/lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
