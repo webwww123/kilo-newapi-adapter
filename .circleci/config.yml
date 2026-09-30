@@ -35,8 +35,10 @@ jobs:
               systemd-analyze verify "ops/$package/"*.service "ops/$package/"*.timer
             done
             sudo -n python3 -B -m unittest discover -s ops/activitywatch-sync -p 'test_*.py' -v
+            sudo -n python3 -B -m unittest discover -s ops/newapi-db-backup -p 'test_*.py' -v
+            bash -n ops/newapi-db-backup/backup.sh
             mkdir -p /tmp/audit-maintenance-artifacts
-            tar --exclude=__pycache__ -czf /tmp/audit-maintenance-artifacts/audit-maintenance.tar.gz -C ops audit-backup audit-retention source-backup activitywatch-sync
+            tar --exclude=__pycache__ -czf /tmp/audit-maintenance-artifacts/audit-maintenance.tar.gz -C ops audit-backup audit-retention source-backup activitywatch-sync newapi-db-backup
             git rev-parse HEAD > /tmp/audit-maintenance-artifacts/source-commit.txt
             cd /tmp/audit-maintenance-artifacts
             sha256sum audit-maintenance.tar.gz source-commit.txt > SHA256SUMS
