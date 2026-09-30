@@ -21,6 +21,7 @@ type contextRecallPolicy struct {
 	Mode            string `json:"mode"`
 	Percent         int    `json:"percent"`
 	FragmentPercent int    `json:"fragment_percent"`
+	RepeatedPercent int    `json:"repeated_percent"`
 }
 
 type contextRecallControl struct {
@@ -33,23 +34,28 @@ type contextRecallControl struct {
 }
 
 type contextRecallEvent struct {
-	Kind            string `json:"kind,omitempty"`
-	FragmentPercent int    `json:"fragment_percent,omitempty"`
-	Version         int    `json:"version"`
-	Timestamp       string `json:"timestamp"`
-	RequestHash     string `json:"request_hash,omitempty"`
-	Protocol        string `json:"protocol"`
-	Mode            string `json:"mode"`
-	Percent         int    `json:"percent"`
-	Reason          string `json:"reason"`
-	Applied         bool   `json:"applied"`
-	InputBytes      int    `json:"input_bytes"`
-	InputItems      int    `json:"input_items"`
-	CandidateItems  int    `json:"candidate_items,omitempty"`
-	Budget          int    `json:"budget"`
-	SelectMS        int64  `json:"select_ms"`
-	Status          int    `json:"status"`
-	DurationMS      int64  `json:"duration_ms"`
+	Kind              string `json:"kind,omitempty"`
+	FragmentPercent   int    `json:"fragment_percent,omitempty"`
+	RepeatedPercent   int    `json:"repeated_percent,omitempty"`
+	RepeatedEnabled   bool   `json:"repeated_enabled,omitempty"`
+	RepeatedAttempted bool   `json:"repeated_attempted,omitempty"`
+	RepeatedMatched   bool   `json:"repeated_matched,omitempty"`
+	RepeatedApplied   bool   `json:"repeated_applied,omitempty"`
+	Version           int    `json:"version"`
+	Timestamp         string `json:"timestamp"`
+	RequestHash       string `json:"request_hash,omitempty"`
+	Protocol          string `json:"protocol"`
+	Mode              string `json:"mode"`
+	Percent           int    `json:"percent"`
+	Reason            string `json:"reason"`
+	Applied           bool   `json:"applied"`
+	InputBytes        int    `json:"input_bytes"`
+	InputItems        int    `json:"input_items"`
+	CandidateItems    int    `json:"candidate_items,omitempty"`
+	Budget            int    `json:"budget"`
+	SelectMS          int64  `json:"select_ms"`
+	Status            int    `json:"status"`
+	DurationMS        int64  `json:"duration_ms"`
 }
 
 type contextRecallRequestKey struct{}
@@ -61,6 +67,7 @@ type contextRecallRequest struct {
 	triggered      bool
 	chosen         bool
 	fragmentChosen bool
+	repeatedChosen bool
 }
 
 func newContextRecallControl(path string) *contextRecallControl {
@@ -97,6 +104,10 @@ func (c *contextRecallControl) current() contextRecallPolicy {
 			if (p.Mode != "shadow" && p.Mode != "apply") || p.Percent < 0 || p.Percent > 100 || p.FragmentPercent < 0 || p.FragmentPercent > 100 {
 				p = contextRecallPolicy{}
 			}
+			// An invalid new flag must not disable the existing recall policy.
+			if p.RepeatedPercent < 0 || p.RepeatedPercent > 100 {
+				p.RepeatedPercent = 0
+			}
 			c.policy.Store(&p)
 			c.nextReadNS.Store(now + int64(time.Second))
 		}
@@ -114,7 +125,9 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	}
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
 		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
-		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent}}
+		repeatedChosen: p.RepeatedPercent > 0 && rand.Intn(100) < p.RepeatedPercent,
+		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent}}
+	q.event.RepeatedEnabled = q.repeatedChosen
 	switch normalizePath(r.URL.Path) {
 	case "/messages":
 		q.event.Protocol = "messages"
@@ -163,7 +176,9 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 			q.event.Reason = "internal_fallback"
 		}
 	}()
-	kept, q.event.Reason = q.control.engine.choose(q.ctx, payload, q.event.Protocol, q.event.InputBytes, budget, baseline...)
+	ctx, trace := q.repeatedContext()
+	kept, q.event.Reason = q.control.engine.choose(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, baseline...)
+	q.recordRepeated(trace, q.event.Reason == "selected" && q.event.Mode == "apply")
 	if q.event.Reason != "selected" {
 		return nil, false
 	}

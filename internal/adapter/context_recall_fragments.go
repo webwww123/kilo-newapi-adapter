@@ -127,7 +127,9 @@ func (q *contextRecallRequest) selectText(original, baseline string) (out string
 			q.event.Reason = "fragment_internal_fallback"
 		}
 	}()
-	out, q.event.Reason = q.control.engine.recallText(q.ctx, original, baseline)
+	ctx, trace := q.repeatedContext()
+	out, q.event.Reason = q.control.engine.recallText(ctx, original, baseline)
+	q.recordRepeated(trace, q.event.Reason == "fragment_selected" && q.event.Mode == "apply")
 	if q.event.Reason != "fragment_selected" || q.event.Mode != "apply" {
 		return "", false
 	}
@@ -228,6 +230,15 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 			chunks[i].score += math.Log(1+float64(len(chunks))/float64(df[term]+1)) * float64(min(count, 2))
 		}
 	}
+	var lineFallbackRequired []repeatedLocation
+	var lineFallbackGuard *repeatedScanner
+	if contextRepeatedEnabled(ctx) {
+		contextRepeatedAttempt(ctx)
+		lineFallbackRequired, lineFallbackGuard = contextRepeatedFragments(ctx, source, split, tailStart, df, chunks)
+		if len(lineFallbackRequired) > 0 {
+			contextRepeatedMatch(ctx)
+		}
+	}
 	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].score > chunks[j].score })
 	budget := r.fragmentCost(baseline)
 	allowance := budget / 5
@@ -250,6 +261,18 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 		}
 		selected = append(selected, chunk)
 		used += cost
+	}
+
+	for _, hit := range lineFallbackRequired {
+		covered := false
+		for _, chunk := range selected {
+			if chunk.lo <= hit.lo && chunk.hi >= hit.hi {
+				covered = true
+			}
+		}
+		if !covered {
+			return "", "fragment_repeated_query_budget"
+		}
 	}
 	if len(selected) == 0 {
 		return "", "fragment_no_evidence"
@@ -282,6 +305,10 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 		} else {
 			hi = mid - 1
 		}
+	}
+
+	if lineFallbackGuard != nil && !lineFallbackGuard.allowPrefixLoss(source, lo, split) {
+		return "", "fragment_protected_repeated_evidence"
 	}
 	out := compose(lo)
 	if ctx.Err() != nil {

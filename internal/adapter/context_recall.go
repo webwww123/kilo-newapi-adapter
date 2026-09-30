@@ -248,9 +248,26 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 			ranked = append(ranked, i)
 		}
 	}
+
+	var lineFallbackRequired []int
 	if !hasPriorEvidence {
-		return nil, "no_recall_evidence"
+		if contextRepeatedEnabled(ctx) {
+			contextRepeatedAttempt(ctx)
+			lineFallbackRequired = contextRepeatedTurns(ctx, items, turns, df)
+			if len(lineFallbackRequired) > 0 {
+				contextRepeatedMatch(ctx)
+			}
+		}
+		if len(lineFallbackRequired) == 0 {
+			return nil, "no_recall_evidence"
+		}
+		for _, i := range lineFallbackRequired {
+			if !chosen[i] {
+				ranked = append(ranked, i)
+			}
+		}
 	}
+
 	sort.SliceStable(ranked, func(a, b int) bool {
 		i, j := ranked[a], ranked[b]
 		if turns[i].score == turns[j].score {
@@ -279,9 +296,16 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 			recalled = true
 		}
 	}
+
+	for _, i := range lineFallbackRequired {
+		if !chosen[i] {
+			return nil, "repeated_query_budget"
+		}
+	}
 	if !recalled {
 		return nil, "no_older_evidence"
 	}
+
 	// Spend any remaining space on items already chosen by the legacy trim,
 	// newest first. Recall never displaces the protected recent suffix.
 	for i := len(turns) - 1; i >= 0; i-- {
