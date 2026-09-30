@@ -1,0 +1,33 @@
+{
+  "source_node": "119",
+  "local_root": "/opt/audit-source-backups",
+  "remote": {
+    "host": "50",
+    "root": "/opt/backup-archive/node119/audit-source"
+  },
+  "retention_verified": 7,
+  "sources": [
+    "/root/3000-newapi",
+    "/root/dujiao-next",
+    "/root/dujiao-next-user",
+    "/root/dujiao-next-admin",
+    "/root/CLIProxyAPI",
+    "/root/cpa-nvidia-middleware-race-work",
+    "/opt/xiaoenai",
+    "/root/ai-sites",
+    "/root/api-caddy",
+    "/root/tagiapi",
+    "/root/frequency-site",
+    "/root/xiaoenai-second-site",
+    "/root/zenmux-newapi-router",
+    "/root/155-compression-tunnel",
+    "/root/newapi-channel-fastadd",
+    "/root/new-api-official-latest",
+    "/root/zenmux-free-model-report",
+    "/root/.gemini/antigravity/xiaoen-redeem-go",
+    "/root/.gemini/antigravity/newapi-monitor-go",
+    "/root/456api-newapi",
+    "/root/gpt-load",
+    "/opt/kilo-newapi-adapter"
+  ]
+}

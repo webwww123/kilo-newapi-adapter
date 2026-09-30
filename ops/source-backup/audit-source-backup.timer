@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted source backup
+
+[Timer]
+OnCalendar=*-*-* 03:40:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=audit-source-backup.service
+
+[Install]
+WantedBy=timers.target

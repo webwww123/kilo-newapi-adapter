@@ -1,0 +1,20 @@
+[Unit]
+Description=Encrypted source backup with off-host restore validation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/python3 /usr/local/lib/audit-source-backup/backup.py --config /etc/audit-source-backup/sources.json --apply
+TimeoutStartSec=3600
+Nice=15
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/audit-source-backups /root/secrets /run/lock
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
