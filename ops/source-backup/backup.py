@@ -20,7 +20,7 @@ import tempfile
 import time
 import uuid
 
-from verify import MAX_FILE, MIN_FREE, REMOTE_ROOT, KEY, private_dir, prune, refs, sha256, verify_archive, stop_private_agent
+from verify import MAX_FILE, MIN_FREE, REMOTE_ROOT, KEY, private_dir, prune, refs, sha256, verify_archive, temporary_gpg_home, verify_shallow_history, safe_error
 
 LOCAL_ROOT = Path("/opt/audit-source-backups")
 LOCK = Path("/run/lock/audit-core-backup.lock")
@@ -38,18 +38,21 @@ PRIVATE_CONFIG = {"Caddyfile", "Caddyfile.prod", "Caddyfile.production"}
 CONFIG_SUFFIXES = {".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".txt"}
 
 
-def command(args, *, cwd=None, destination=None, timeout=300, input=None):
-    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0")
-    if destination is None:
-        result = subprocess.run(args, cwd=cwd, env=env, input=input,
-                                capture_output=True, timeout=timeout)
-    else:
-        with open(destination, "xb") as sink:
+def command(args, *, cwd=None, destination=None, timeout=300, input=None, failure="backup command failed"):
+    env = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1")
+    try:
+        if destination is None:
             result = subprocess.run(args, cwd=cwd, env=env, input=input,
-                                    stdout=sink, stderr=subprocess.PIPE, timeout=timeout)
-        Path(destination).chmod(0o600)
+                                    capture_output=True, timeout=timeout)
+        else:
+            with open(destination, "xb") as sink:
+                result = subprocess.run(args, cwd=cwd, env=env, input=input,
+                                        stdout=sink, stderr=subprocess.PIPE, timeout=timeout)
+            Path(destination).chmod(0o600)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(failure) from None
     if result.returncode:
-        raise RuntimeError("backup command failed")
+        raise RuntimeError(failure)
     return result.stdout if destination is None else None
 
 
@@ -144,7 +147,18 @@ def git_state(root):
     index_path = Path(git(root, "rev-parse", "--git-path", "index").decode().strip())
     if not index_path.is_absolute():
         index_path = root / index_path
+    shallow = git(root, "rev-parse", "--is-shallow-repository").strip() == b"true"
+    shallow_path = Path(git(root, "rev-parse", "--git-path", "shallow").decode().strip())
+    if not shallow_path.is_absolute():
+        shallow_path = root / shallow_path
+    symbolic = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "HEAD"],
+                              capture_output=True, timeout=10,
+                              env=dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1"))
+    if symbolic.returncode not in (0, 1):
+        raise RuntimeError("git_history_check_failed")
     return {"enabled": True, "head": head.stdout.decode().strip() if head.returncode == 0 else None,
+            "symbolic_head": symbolic.stdout.decode().strip() if symbolic.returncode == 0 else None,
+            "shallow": shallow, "shallow_sha256": sha256(shallow_path) if shallow else None,
             "refs": refs(root), "index_sha256": sha256(index_path) if index_path.exists() else None,
             "status_sha256": hashlib.sha256(git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")).hexdigest()}
 
@@ -210,21 +224,48 @@ def build_archive(root, work):
     if before["enabled"]:
         collect_patches(root, output, entries, omitted)
     if before["head"]:
-        bundle = output / "history.bundle"
-        git(root, "bundle", "create", str(bundle), "--all", "HEAD")
-        bundle.chmod(0o600)
-        git(root, "bundle", "verify", str(bundle))
+        if before["shallow"]:
+            history = output / "history.git"
+            command(["git", "clone", "--mirror", "--no-hardlinks", "--dissociate", "--template=",
+                     str(root), str(history)], failure="git_shallow_clone_failed")
+            # clone 可把游离 HEAD 自动选成同提交的分支，副本须保留原形式。
+            (history / "HEAD").write_text(("ref: " + before["symbolic_head"] if before["symbolic_head"]
+                                           else before["head"]) + "\n")
+            (history / "HEAD").chmod(0o600)
+            shallow_source = Path(git(root, "rev-parse", "--git-path", "shallow").decode().strip())
+            if not shallow_source.is_absolute():
+                shallow_source = root / shallow_source
+            boundary = history / "shallow.snapshot"
+            snapshot_file(shallow_source, boundary, fingerprint(shallow_source.lstat()))
+            if sha256(boundary) != before["shallow_sha256"]:
+                raise RuntimeError("source drift; snapshot refused")
+            # 本地 clone 可重复写同一边界行；先验证集合，再保留原始字节。
+            if set((history / "shallow").read_bytes().splitlines()) != set(boundary.read_bytes().splitlines()):
+                raise RuntimeError("git_history_shallow_mismatch")
+            boundary.replace(history / "shallow")
+            verify_shallow_history(history, before)
+        else:
+            bundle = output / "history.bundle"
+            git(root, "bundle", "create", str(bundle), "--all", "HEAD")
+            bundle.chmod(0o600)
+            git(root, "bundle", "verify", str(bundle))
     after_entries, after_omitted = scan(root)
     if entries != after_entries or omitted[:len(after_omitted)] != after_omitted or before != git_state(root):
         raise RuntimeError("source drift; snapshot refused")
     files = {}
     for path in sorted(output.rglob("*")):
-        if path.is_file():
+        st = path.lstat()
+        if stat.S_ISDIR(st.st_mode):
+            path.chmod(0o700)
+        elif stat.S_ISREG(st.st_mode) and st.st_nlink == 1:
+            path.chmod(0o600)
             relative = path.relative_to(output).as_posix()
             files[relative] = {"sha256": sha256(path), "size": path.stat().st_size}
             if relative.startswith(("worktree/", "private-config/")) and "/changes/" not in relative:
                 original = relative.split("/", 1)[1]
                 files[relative]["mode"] = entries[original]["stat"][-1] & 0o777
+        else:
+            raise RuntimeError("git_history_member_unsafe")
     manifest = {"format": 1, "source": str(root), "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "git": before, "files": files, "omissions": omitted,
                 "omission_counts": dict(Counter(item["reason"] for item in omitted)),
@@ -319,14 +360,11 @@ def backup_repository(root):
         archive, manifest = build_archive(root, Path(work))
         if shutil.disk_usage(directory).free < MIN_FREE:
             raise RuntimeError("local free space below 10 GiB during backup")
-        private_dir(Path(work) / "gnupg")
-        try:
+        with temporary_gpg_home() as home:
             command(["gpg", "--no-options", "--batch", "--quiet", "--pinentry-mode", "loopback",
-                     "--no-symkey-cache", "--homedir", str(Path(work) / "gnupg"),
+                     "--no-symkey-cache", "--homedir", str(home),
                      "--passphrase-file", str(KEY), "--symmetric", "--cipher-algo", "AES256",
-                     "--output", str(destination), str(archive)])
-        finally:
-            stop_private_agent(Path(work) / "gnupg")
+                     "--output", str(destination), str(archive)], failure="gpg_encrypt_failed")
         destination.chmod(0o600)
     digest = sha256(destination)
     remote_target = str(REMOTE_ROOT / repo_id / name)
@@ -407,7 +445,7 @@ def main():
             except Exception as error:
                 failed = True
                 print(json.dumps({"repository": repository_id(root), "verified": False,
-                                  "error_type": type(error).__name__}), flush=True)
+                                  **safe_error(error)}), flush=True)
         return 1 if failed else 0
 
 
@@ -415,5 +453,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        print(json.dumps({"verified": False, "error_type": type(error).__name__}))
+        print(json.dumps({"verified": False, **safe_error(error)}))
         raise SystemExit(1)

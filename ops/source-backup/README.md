@@ -4,7 +4,8 @@
 
 ## 包含与缺口
 
-- 有提交的 Git 仓库：`git bundle --all HEAD` 保全当前 HEAD 和全部可达引用，包括本地分支、标签、远端跟踪引用、stash；不保证保全已经没有任何引用的悬空对象/仅在 reflog 中的旧提交。
+- 有提交的完整 Git 仓库：`git bundle --all HEAD` 保全当前 HEAD 和全部可达引用，包括本地分支、标签、远端跟踪引用、stash；不保证保全已经没有任何引用的悬空对象/仅在 reflog 中的旧提交。
+- 只含部分历史的浅仓库：保存不依赖源目录、没有硬链接或 alternates 的本地 `history.git` 镜像，精确保留当前 HEAD 形式、全部引用和浅边界。只保存机器上已有的历史，不 fetch、不补取上游缺失提交；备份和恢复均禁止自动取对象。
 - 所有项目：安全工作区，及可保存的 staged/unstaged 二进制差异；没有 Git 或尚无首个提交也可备份。
 - 普通工作区不含 `.env`、私钥/凭据、数据库、日志、构建物、嵌套独立仓库、链接/特殊文件。大于 16 MiB 的单文件跳过并计数；过大的差异文件也会计入缺口。嵌套仓库应另列清单，不通过父目录漏备或跨边界读取。
 - Caddyfile 只进包内 `private-config/`，不混进普通工作区。历史 Git 对象可能含旧密钥，所以每个项目的整个包都用 GPG AES256 对称加密。备份程序和日志不输出源码、差异、远端 URL、密钥或环境内容。
@@ -26,9 +27,9 @@ bash install.sh
 
 程序首次执行生成 root-only `/root/secrets/audit-source-backup.pass`（600），并经 SSH 加密传输复制到 50 同名 root-only 文件。既有异机密钥不匹配时拒绝覆盖、任务失败。真实值只由程序读，不进入输出。两机密钥不能与备份包一起公开；应另做离线保管，否则同时失去两机密钥后加密包无法恢复。
 
-每仓验证包括：源码文件复制前后身份/时间/大小不变、最终安全文件清单与 HEAD/refs/index/status 不漂移，bundle 本地 verify、mirror clone 后全部引用匹配，tar 无链接/路径穿越且各成员尺寸/hash 匹配；50 再核验加密包 SHA256、解密、mirror clone、成员内容hash。中途漂移则该项目失败，旧备份原样。
+每仓验证包括：源码文件复制前后身份/时间/大小不变、最终安全文件清单与 HEAD/refs/index/status/浅边界不漂移，完整仓库 bundle 本地 verify、mirror clone 后全部引用匹配，浅仓库镜像验证 HEAD/全部引用/边界字节、无外部依赖且对象连通，tar 无链接/路径穿越且各成员尺寸/hash 匹配；50 再核验加密包 SHA256、解密、Git 恢复和成员内容 hash。中途漂移则该项目失败，旧备份原样。两端 GPG 均使用本任务独占、短路径的 `/tmp` 私有目录，退出时仅停止该目录的 agent 并清理自有临时目录。
 
-恢复请先进入 root-only 临时目录，用本机密钥通过 `gpg --batch --pinentry-mode loopback --passphrase-file <密钥路径> --decrypt --output <临时tar> <加密包>` 解密，再用 `verify.verify_archive` 验证并安全解包。`history.bundle` 可恢复完整引用；`worktree/` 是当前安全文件；`changes/` 保留 staged/unstaged 差异；`private-config/` 不应直接覆盖正在运行的配置。先在独立恢复目录应用差异并核对省略清单，禁止覆盖原项目或部署 secret。恢复 Git 时要注意历史对象可能包含旧密钥，不应上传到公开仓库。
+恢复请先进入 root-only 临时目录，用本机密钥通过 `gpg --batch --pinentry-mode loopback --passphrase-file <密钥路径> --decrypt --output <临时tar> <加密包>` 解密，再用 `verify.verify_archive` 验证并安全解包。`history.bundle` 可恢复完整引用，浅仓库的 `history.git` 已是包含机器现有历史的独立镜像；`worktree/` 是当前安全文件；`changes/` 保留 staged/unstaged 差异；`private-config/` 不应直接覆盖正在运行的配置。先在独立恢复目录应用差异并核对省略清单，禁止覆盖原项目或部署 secret。恢复 Git 时要注意历史对象可能包含旧密钥，不应上传到公开仓库。
 
 ## 回退与本地测试
 

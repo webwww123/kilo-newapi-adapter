@@ -1,11 +1,14 @@
 import hashlib
+from contextlib import contextmanager
 import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tarfile
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -33,6 +36,129 @@ class SourceBackupTests(unittest.TestCase):
     def commit(self):
         backup.git(self.root, "add", "--all")
         backup.git(self.root, "commit", "-m", "fixture")
+
+    def shallow_fixture(self):
+        self.initialize()
+        (self.root / "app.py").write_text("print('old upstream')\n")
+        self.commit()
+        older = backup.git(self.root, "rev-parse", "HEAD").decode().strip()
+        (self.root / "app.py").write_text("print('shallow boundary')\n")
+        self.commit()
+        upstream = self.base / "upstream"
+        self.root.rename(upstream)
+        # 仅测试夹具通过 file:// 建浅仓，生产备份不 fetch、不补历史。
+        backup.command(["git", "clone", "--depth", "1", upstream.as_uri(), str(self.root)])
+        self.initialize()
+        (self.root / "app.py").write_text("print('local commit')\n")
+        self.commit()
+        backup.git(self.root, "branch", "local-only")
+        backup.git(self.root, "tag", "local-tag")
+        return upstream, older
+
+    def rewrite_archive(self, original, destination, change):
+        with tarfile.open(original, "r:gz") as package:
+            contents = {m.name: package.extractfile(m).read() for m in package.getmembers()}
+        manifest = json.loads(contents["manifest.json"])
+        change(manifest, contents)
+        contents["manifest.json"] = json.dumps(manifest).encode()
+        with tarfile.open(destination, "w:gz") as package:
+            for name, value in contents.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(value)
+                package.addfile(member, io.BytesIO(value))
+
+    def test_shallow_local_commit_and_wip_restore_without_original_sources(self):
+        upstream, older = self.shallow_fixture()
+        (self.root / "app.py").write_text("print('staged')\n")
+        backup.git(self.root, "add", "app.py")
+        (self.root / "app.py").write_text("print('unstaged')\n")
+        (self.root / "local.py").write_text("print('untracked')\n")
+        before = backup.git_state(self.root)
+        archive, manifest = backup.build_archive(self.root, self.work)
+        self.assertEqual(before, backup.git_state(self.root))
+        self.assertTrue(manifest["git"]["shallow"])
+        self.assertNotIn("history.bundle", manifest["files"])
+        self.root.rename(self.base / "source-offline")
+        upstream.rename(self.base / "upstream-offline")
+        restored = self.base / "restored-shallow"
+        verify.verify_archive(archive, restored)
+        history = restored / "history.git"
+        self.assertEqual(verify.refs(history), before["refs"])
+        self.assertEqual(backup.git(history, "rev-parse", "HEAD").decode().strip(), before["head"])
+        self.assertEqual(backup.git(history, "rev-parse", "--is-shallow-repository").strip(), b"true")
+        self.assertEqual(verify.sha256(history / "shallow"), before["shallow_sha256"])
+        self.assertFalse((history / "objects/info/alternates").exists())
+        self.assertTrue(all(p.stat().st_nlink == 1 for p in history.rglob("*") if p.is_file()))
+        backup.git(history, "fsck", "--connectivity-only", "--no-reflogs")
+        with self.assertRaises(RuntimeError):
+            backup.git(history, "cat-file", "-e", older + "^{commit}")
+        self.assertEqual((restored / "worktree/app.py").read_text(), "print('unstaged')\n")
+        self.assertEqual((restored / "worktree/local.py").read_text(), "print('untracked')\n")
+        self.assertGreater((restored / "changes/staged.patch").stat().st_size, 0)
+        self.assertGreater((restored / "changes/unstaged.patch").stat().st_size, 0)
+
+    def test_shallow_detached_head_is_preserved(self):
+        self.shallow_fixture()
+        backup.git(self.root, "checkout", "--detach")
+        (self.root / "app.py").write_text("print('detached local commit')\n")
+        self.commit()
+        before = backup.git_state(self.root)
+        self.assertIsNone(before["symbolic_head"])
+        archive, _ = backup.build_archive(self.root, self.work)
+        self.root.rename(self.base / "source-offline")
+        target = self.base / "restore-detached"
+        verify.verify_archive(archive, target)
+        self.assertEqual((target / "history.git/HEAD").read_text().strip(), before["head"])
+
+    def test_shallow_boundary_drift_during_restore_refuses_success(self):
+        self.shallow_fixture()
+        original = backup.verify_archive
+
+        def drift(*args):
+            value = original(*args)
+            boundary = self.root / ".git/shallow"
+            boundary.write_text(boundary.read_text() + backup.git_state(self.root)["head"] + "\n")
+            return value
+
+        with mock.patch.object(backup, "verify_archive", side_effect=drift):
+            with self.assertRaisesRegex(RuntimeError, "source drift during restore"):
+                backup.build_archive(self.root, self.work)
+
+    def test_shallow_restore_rejects_alternates_dependency(self):
+        self.shallow_fixture()
+        archive, _ = backup.build_archive(self.root, self.work)
+
+        def dependency(manifest, contents):
+            name = "history.git/objects/info/alternates"
+            value = b"/nonexistent-test-only-source/objects\n"
+            contents[name] = value
+            manifest["files"][name] = {"size": len(value), "sha256": hashlib.sha256(value).hexdigest()}
+
+        bad = self.base / "dependent.tar.gz"
+        self.rewrite_archive(archive, bad, dependency)
+        with self.assertRaisesRegex(RuntimeError, "git_history_dependency"):
+            verify.verify_archive(bad, self.base / "restore-dependent")
+
+    def test_shallow_restore_requires_original_refs_and_head(self):
+        self.shallow_fixture()
+        archive, _ = backup.build_archive(self.root, self.work)
+        for field, value, expected in [("refs", [], "restored refs mismatch"),
+                                       ("head", "0" * 40, "git_history_head_mismatch")]:
+            with self.subTest(field=field):
+                bad = self.base / (field + ".tar.gz")
+                self.rewrite_archive(archive, bad, lambda manifest, _: manifest["git"].update({field: value}))
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    verify.verify_archive(bad, self.base / ("restore-" + field))
+
+    def test_failure_report_only_contains_fixed_safe_codes(self):
+        external = RuntimeError("synthetic private stderr must stay hidden")
+        self.assertEqual(verify.safe_error(external), {"error_type": "RuntimeError", "error_code": "unexpected_error"})
+        self.assertEqual(verify.safe_error(RuntimeError("source drift; snapshot refused"))["error_code"],
+                         "source_snapshot_drift")
+        with self.assertRaises(RuntimeError) as raised:
+            backup.command(["python3", "-c", "import sys; sys.stderr.write('synthetic private stderr'); sys.exit(1)"],
+                           failure="gpg_encrypt_failed")
+        self.assertEqual(verify.safe_error(raised.exception)["error_code"], "gpg_encrypt_failed")
 
     def test_dirty_staged_unstaged_and_all_refs_restore(self):
         self.initialize()
@@ -202,16 +328,82 @@ class SourceBackupTests(unittest.TestCase):
         key_dir.mkdir(mode=0o700)
         key = key_dir / "pass"
         backup.ensure_key(key)
-        home = backup.private_dir(self.base / "gnupg")
         encrypted, plain = self.base / "source.gpg", self.base / "decrypted.tar.gz"
-        common = ["gpg", "--no-options", "--batch", "--quiet", "--no-symkey-cache", "--homedir", str(home),
-                  "--pinentry-mode", "loopback", "--passphrase-file", str(key)]
-        backup.command(common + ["--symmetric", "--cipher-algo", "AES256", "--output", str(encrypted), str(archive)])
-        backup.command(common + ["--output", str(plain), "--decrypt", str(encrypted)])
-        verify.stop_private_agent(home)
+        with verify.temporary_gpg_home() as home:
+            common = ["gpg", "--no-options", "--batch", "--quiet", "--no-symkey-cache", "--homedir", str(home),
+                      "--pinentry-mode", "loopback", "--passphrase-file", str(key)]
+            backup.command(common + ["--symmetric", "--cipher-algo", "AES256", "--output", str(encrypted), str(archive)])
+            backup.command(common + ["--output", str(plain), "--decrypt", str(encrypted)])
         restored = self.base / "decrypted-restore"
         verify.verify_archive(plain, restored)
         self.assertEqual((restored / "worktree/app.py").read_text(), "print('roundtrip')\n")
+
+    @unittest.skipUnless(os.geteuid() == 0 and all(shutil.which(name) for name in
+                         ["gpg", "gpgconf", "gpg-connect-agent"]), "requires root and GPG tools")
+    def test_long_repository_id_real_local_and_remote_gpg_with_agent_exit(self):
+        self.root.rename(self.base / ("long-project-" + "x" * 90))
+        self.root = self.base / ("long-project-" + "x" * 90)
+        (self.root / "app.py").write_text("print('long path')\n")
+        key_dir = verify.private_dir(self.base / "secrets")
+        key = key_dir / "pass"
+        backup.ensure_key(key)
+        local, remote = self.base / "local", self.base / "remote"
+        old_home = local / backup.repository_id(self.root) / ".snapshot-12345678" / "gnupg"
+        self.assertGreaterEqual(len(str(old_home / "S.gpg-agent.browser").encode()), 108)
+        original_command = backup.command
+        original_home = verify.temporary_gpg_home
+        agents = []
+
+        @contextmanager
+        def observed_home():
+            with original_home() as home:
+                self.assertLess(len(str(home / "S.gpg-agent.browser").encode()), 108)
+                self.assertEqual(home.stat().st_mode & 0o777, 0o700)
+                response = verify.run(["gpg-connect-agent", "--homedir", str(home), "GETINFO pid", "/bye"], timeout=10)
+                pid = int(re.search(rb"^D ([0-9]+)$", response, re.MULTILINE).group(1))
+                agents.append((home, pid))
+                yield home
+
+        def local_transport(args, **kwargs):
+            if args[0] == "scp":
+                destination = Path(args[-1].removeprefix("50:"))
+                self.assertTrue(destination.is_relative_to(remote))
+                shutil.copyfile(args[-2], destination)
+                destination.chmod(0o600)
+                return b""
+            return original_command(args, **kwargs)
+
+        def local_remote(script, *arguments, **kwargs):
+            if script == backup.PREPARE_SCRIPT:
+                verify.private_dir(verify.private_dir(remote) / arguments[0])
+                return b"ready"
+            return json.dumps(verify.remote_verify(*arguments)).encode()
+
+        with mock.patch.object(backup, "LOCAL_ROOT", local), mock.patch.object(backup, "REMOTE_ROOT", remote), \
+                mock.patch.object(verify, "REMOTE_ROOT", remote), \
+                mock.patch.object(backup, "KEY", key), mock.patch.object(verify, "KEY", key), \
+                mock.patch.object(backup, "MIN_FREE", 0), mock.patch.object(verify, "MIN_FREE", 0), \
+                mock.patch.object(backup, "command", side_effect=local_transport), \
+                mock.patch.object(backup, "remote_python", side_effect=local_remote), \
+                mock.patch.object(backup, "temporary_gpg_home", side_effect=observed_home), \
+                mock.patch.object(verify, "temporary_gpg_home", side_effect=observed_home):
+            result = backup.backup_repository(self.root)
+        self.assertTrue(result["verified"])
+        self.assertEqual(len(agents), 2)
+        for home, pid in agents:
+            self.assertFalse(home.exists())
+            deadline = time.monotonic() + 5
+            running = True
+            while time.monotonic() < deadline:
+                try:
+                    state = Path(f"/proc/{pid}/stat").read_text().rpartition(") ")[2].split()[0]
+                    running = state not in {"Z", "X"}
+                except FileNotFoundError:
+                    running = False
+                if not running:
+                    break
+                time.sleep(0.02)
+            self.assertFalse(running, "private GPG agent did not exit")
 
 
 if __name__ == "__main__":
