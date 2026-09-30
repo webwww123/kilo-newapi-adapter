@@ -1,0 +1,11 @@
+[Unit]
+Description=Check archived system journal capacity every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=90
+Persistent=true
+Unit=audit-journal-retention.service
+
+[Install]
+WantedBy=timers.target

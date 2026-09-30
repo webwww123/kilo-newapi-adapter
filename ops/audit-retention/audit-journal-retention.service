@@ -1,0 +1,17 @@
+[Unit]
+Description=Vacuum archived system journals to one GiB without restarting journald
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+ExecStart=/usr/bin/journalctl --vacuum-size=1G
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=-/var/log/journal -/run/log/journal
+RestrictAddressFamilies=AF_UNIX

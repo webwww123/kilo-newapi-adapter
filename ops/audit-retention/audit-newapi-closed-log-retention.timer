@@ -1,0 +1,11 @@
+[Unit]
+Description=Check closed legacy NewAPI diagnostic logs every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=60
+Persistent=true
+Unit=audit-newapi-closed-log-retention.service
+
+[Install]
+WantedBy=timers.target

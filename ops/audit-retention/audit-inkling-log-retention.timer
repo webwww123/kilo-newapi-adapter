@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Inkling log retention every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=30
+Persistent=true
+Unit=audit-inkling-log-retention.service
+
+[Install]
+WantedBy=timers.target
