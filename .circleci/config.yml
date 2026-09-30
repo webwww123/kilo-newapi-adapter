@@ -10,8 +10,39 @@ parameters:
   request_log_retention_requested:
     type: boolean
     default: false
+  audit_maintenance_requested:
+    type: boolean
+    default: false
 
 jobs:
+  audit-maintenance-check:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large.gen2
+    environment:
+      EXPECTED_COMMIT: << pipeline.parameters.expected_commit >>
+    steps:
+      - checkout
+      - run:
+          name: Verify, test and package audit maintenance
+          command: |
+            test -n "$EXPECTED_COMMIT"
+            test "$CIRCLE_SHA1" = "$EXPECTED_COMMIT"
+            test "$(git rev-parse HEAD)" = "$CIRCLE_SHA1"
+            for package in audit-backup audit-retention source-backup; do
+              sudo -n python3 -B -m unittest discover -s "ops/$package" -p 'test_*.py' -v
+              bash -n "ops/$package/install.sh"
+              systemd-analyze verify "ops/$package/"*.service "ops/$package/"*.timer
+            done
+            sudo -n python3 -B -m unittest discover -s ops/activitywatch-sync -p 'test_*.py' -v
+            mkdir -p /tmp/audit-maintenance-artifacts
+            tar --exclude=__pycache__ -czf /tmp/audit-maintenance-artifacts/audit-maintenance.tar.gz -C ops audit-backup audit-retention source-backup activitywatch-sync
+            git rev-parse HEAD > /tmp/audit-maintenance-artifacts/source-commit.txt
+            cd /tmp/audit-maintenance-artifacts
+            sha256sum audit-maintenance.tar.gz source-commit.txt > SHA256SUMS
+      - store_artifacts:
+          path: /tmp/audit-maintenance-artifacts
+          destination: audit-maintenance
   request-log-retention-check:
     machine:
       image: ubuntu-2404:current
@@ -92,6 +123,10 @@ jobs:
           destination: kilo-newapi-adapter
 
 workflows:
+  audit-maintenance:
+    when: << pipeline.parameters.audit_maintenance_requested >>
+    jobs:
+      - audit-maintenance-check
   request-log-retention:
     when: << pipeline.parameters.request_log_retention_requested >>
     jobs:

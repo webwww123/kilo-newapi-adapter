@@ -20,7 +20,7 @@ bash install.sh
 
 以上均预演。经主代理核实 CI 同提交源码后才用 `install.sh --apply`，需要 CI 包内 `source-commit.txt` 与环境 `AUDIT_SOURCE_BACKUP_CONFIRM_COMMIT` 精确一致；现有文件和定时器状态先保全到 root-only 安装回退目录。默认不启用 timer，首批烟测可运行 `backup.py --apply --only /root/ai-sites`，验证后安装时加 `--enable-timer`。完整运行由 `audit-source-backup.service` 执行，后续每日 03:40 后随机延迟最多 15 分钟。与业务备份共享 `/run/lock/audit-core-backup.lock`，最多等待 10 分钟；两者不会并发。锁超时使本次任务失败，不会清理旧备份。
 
-本地保留 `/opt/audit-source-backups/<项目ID>/`，异地保留 `50:/opt/backup-archive/node119/audit-source/<项目ID>/`。每项目分别留最近 7 个成功完成异机解密和恢复校验的加密包；失败包不计入成功数，也不触发旧保险删除。两机每次任务前至少 10 GiB 空闲；运行中低于此线会停止当前项目。失败包只可能属于本任务，可在查清失败原因后另行清理。
+本地保留 `/opt/audit-source-backups/<项目ID>/`，异机保留 `50:/opt/backup-archive/node119/audit-source/<项目ID>/`。这是两台服务器上的副本，不代表异地或跨服务商容灾。每项目分别留最近 7 个成功完成异机解密和恢复校验的加密包；失败包不计入成功数，也不触发旧保险删除。两机每次任务前至少 10 GiB 空闲；运行中低于此线会停止当前项目。失败包只可能属于本任务，可在查清失败原因后另行清理。
 
 ## 密钥与恢复
 
