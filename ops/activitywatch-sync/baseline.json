@@ -1,0 +1,9 @@
+{
+  "source_sha256": "d843a926053be9696426f41e0ba55d365d926374bc0d9c133d13463bab958cd1",
+  "unit_sha256": "fb91ad5f477f68a6bf45dcbc69d0a52896585cab23912d521530eee7f5df75ba",
+  "source_path": "/opt/activitywatch-sync/server.py",
+  "service": "activitywatch-sync.service",
+  "database_path": "/opt/activitywatch-sync/data/activitywatch.sqlite3",
+  "port": 18765,
+  "source_reviewed_at_utc": "2026-09-30T04:54:00+00:00"
+}

@@ -1,0 +1,4 @@
+# Add these exact entries to the PROJECTS array in /usr/local/bin/node-index.
+# Review and apply through the existing source/index workflow; this package does not edit it.
+  "activitywatch-sync-source|/opt/kilo-newapi-adapter/ops/activitywatch-sync|activitywatch 活动记录 个人同步 源码|"
+  "activitywatch-sync-runtime|/opt/activitywatch-sync|activitywatch 活动记录 个人同步|sys:activitywatch-sync.service"
