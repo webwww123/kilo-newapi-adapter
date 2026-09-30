@@ -26,6 +26,8 @@ SQLite 的两节点验收包括真正解压成独立数据库再只读打开。M
 
 CI 产物验证后，先在 50 运行 `install.sh --apply --archive`，再在 119 运行 `install.sh --apply`。默认不启用 timer；首次全部备份/异机验收成功后再用 `--enable-timer`，或单独 enable 对应 timer。每日 UTC 04:40，加最多 5 分钟随机延迟；程序锁防止自己的定时与手工任务重叠。
 
+安装要求 CI 的 `source-commit.txt` 与 `AUDIT_CORE_BACKUP_CONFIRM_COMMIT` 完全相符。CI 文件解压应使用 `--no-same-owner`，放进主代理已核实 SHA/commit 的 root-only staging，再将已验证 `source-commit.txt` 放入各模块目录；来源/目的文件必须 root-owned、普通单链接，目录不可经过符号链接。安装前记录新任务 timer 的启用/运行状态及原文件，不把状态回退与数据库恢复混为一谈。
+
 备份各项串行；要求至少 10GiB 剩余。主要活库估计：SQLite 最大 2.3GB、MySQL 数据索引约 2.2GB、Monitor 1.3GB、小恩爱压缩包约 294MB。备份、压缩与恢复检查会读写数 GB，不能承诺绝对零干扰，建议低谷执行。单项 SQLite 最大 600 秒、MySQL 900 秒、PG 180 秒；内层数据库客户端有 timeout，外层再次限时；systemd 的整批时限 2 小时、低 CPU/IO 优先级。
 
 成功异机副本保存后，本地和异机只清理这套程序创建且超过 7 天、checksum 验收成功、当前新包范围覆盖的旧 run。既有手工快照、其他目录、源库、失败或没有异机验收证据的包均保留。不认识的文件、链接或残留临时目录都会阻止删除。失败造成的未验收包可能超过 7 天，需查看失败原因及剩余空间，不盲目删除。
