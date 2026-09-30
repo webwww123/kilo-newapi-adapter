@@ -2,7 +2,7 @@
 Description=Daily verified business database backup
 
 [Timer]
-OnCalendar=*-*-* 04:40:00 UTC
+OnCalendar=*-*-* 19:45:00 UTC
 RandomizedDelaySec=300
 Persistent=true
 Unit=audit-core-backup.service

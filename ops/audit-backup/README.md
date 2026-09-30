@@ -24,7 +24,7 @@ SQLite 的两节点验收包括真正解压成独立数据库再只读打开。M
 
 ## 日常与保留
 
-CI 产物验证后，先在 50 运行 `install.sh --apply --archive`，再在 119 运行 `install.sh --apply`。默认不启用 timer；首次全部备份/异机验收成功后再用 `--enable-timer`，或单独 enable 对应 timer。每日 UTC 04:40，加最多 5 分钟随机延迟；程序锁防止自己的定时与手工任务重叠。
+CI 产物验证后，先在 50 运行 `install.sh --apply --archive`，再在 119 运行 `install.sh --apply`。默认不启用 timer；首次全部备份/异机验收成功后再用 `--enable-timer`，或单独 enable 对应 timer。每日 UTC 19:45，加最多 5 分钟随机延迟，接在小恩爱已有 19:30 本机备份完成之后，减少最新备份复制到异机的等待；程序锁防止自己的定时与手工任务重叠。
 
 安装要求 CI 的 `source-commit.txt` 与 `AUDIT_CORE_BACKUP_CONFIRM_COMMIT` 完全相符。CI 文件解压应使用 `--no-same-owner`，放进主代理已核实 SHA/commit 的 root-only staging，再将已验证 `source-commit.txt` 放入各模块目录；来源/目的文件必须 root-owned、普通单链接，目录不可经过符号链接。安装前记录新任务 timer 的启用/运行状态及原文件，不把状态回退与数据库恢复混为一谈。
 
