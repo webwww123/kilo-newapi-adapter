@@ -7,8 +7,36 @@ parameters:
   expected_commit:
     type: string
     default: ""
+  request_log_retention_requested:
+    type: boolean
+    default: false
 
 jobs:
+  request-log-retention-check:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: large.gen2
+    environment:
+      EXPECTED_COMMIT: << pipeline.parameters.expected_commit >>
+    steps:
+      - checkout
+      - run:
+          name: Verify, test and package request-log retention
+          command: |
+            test -n "$EXPECTED_COMMIT"
+            test "$CIRCLE_SHA1" = "$EXPECTED_COMMIT"
+            test "$(git rev-parse HEAD)" = "$CIRCLE_SHA1"
+            python3 -B -m unittest discover -s ops/request-log-retention -p 'test_*.py' -v
+            bash -n ops/request-log-retention/install.sh
+            systemd-analyze verify ops/request-log-retention/kilo-request-log-retention.service ops/request-log-retention/kilo-request-log-retention.timer
+            mkdir -p /tmp/request-log-retention-artifacts
+            tar --exclude=__pycache__ -czf /tmp/request-log-retention-artifacts/request-log-retention.tar.gz -C ops/request-log-retention .
+            git rev-parse HEAD > /tmp/request-log-retention-artifacts/source-commit.txt
+            cd /tmp/request-log-retention-artifacts
+            sha256sum request-log-retention.tar.gz source-commit.txt > SHA256SUMS
+      - store_artifacts:
+          path: /tmp/request-log-retention-artifacts
+          destination: request-log-retention
   test-and-build:
     machine:
       image: ubuntu-2404:current
@@ -64,6 +92,10 @@ jobs:
           destination: kilo-newapi-adapter
 
 workflows:
+  request-log-retention:
+    when: << pipeline.parameters.request_log_retention_requested >>
+    jobs:
+      - request-log-retention-check
   test-and-build:
     when:
       << pipeline.parameters.build_requested >>

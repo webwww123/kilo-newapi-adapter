@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Kilo request log retention every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=30
+Persistent=true
+Unit=kilo-request-log-retention.service
+
+[Install]
+WantedBy=timers.target
