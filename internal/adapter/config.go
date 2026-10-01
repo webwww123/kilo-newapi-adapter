@@ -28,6 +28,8 @@ type Config struct {
 	KiloAutoTelemetryEnabled     bool
 	TrustedNewAPIErrors          bool
 	ContextRecallConfigPath      string
+	StepToolsBundlePath          string
+	ContextRecallMetadataOnly    bool
 }
 
 func ConfigFromEnv() Config {
@@ -50,8 +52,10 @@ func ConfigFromEnv() Config {
 			os.Getenv("KILO_AUTO_REQUEST_COMPAT_ENABLED"),
 			false,
 		),
-		KiloAutoTelemetryEnabled: parseBool(os.Getenv("KILO_AUTO_TELEMETRY_ENABLED"), false),
-		ContextRecallConfigPath:  strings.TrimSpace(os.Getenv("CONTEXT_RECALL_CONFIG")),
+		KiloAutoTelemetryEnabled:  parseBool(os.Getenv("KILO_AUTO_TELEMETRY_ENABLED"), false),
+		ContextRecallConfigPath:   strings.TrimSpace(os.Getenv("CONTEXT_RECALL_CONFIG")),
+		StepToolsBundlePath:       strings.TrimSpace(os.Getenv("CONTEXT_STEP_TOOLS_BUNDLE")),
+		ContextRecallMetadataOnly: parseBool(os.Getenv("CONTEXT_RECALL_METADATA_ONLY"), false),
 		TrustedNewAPIErrors: parseBool(
 			os.Getenv("TRUSTED_NEWAPI_ERROR_DIAGNOSTICS"),
 			false,

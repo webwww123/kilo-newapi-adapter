@@ -47,7 +47,8 @@ func contextRepeatedMatch(ctx context.Context) {
 
 func (q *contextRecallRequest) repeatedContext() (context.Context, *contextRepeatedTrace) {
 	trace := &contextRepeatedTrace{}
-	ctx := context.WithValue(q.ctx, contextRepeatedKey{}, q.repeatedChosen)
+	ctx := context.WithValue(q.ctx, contextStepToolsGuardKey{}, q.event.ToolsApplied)
+	ctx = context.WithValue(ctx, contextRepeatedKey{}, q.repeatedChosen)
 	return context.WithValue(ctx, contextRepeatedTraceKey{}, trace), trace
 }
 

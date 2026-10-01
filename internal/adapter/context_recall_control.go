@@ -18,13 +18,16 @@ import (
 // Optional local control file; absent, invalid, oversized or disabled means
 // exact legacy trimming. Updating this file never restarts a live service.
 type contextRecallPolicy struct {
-	Mode            string `json:"mode"`
-	Percent         int    `json:"percent"`
-	FragmentPercent int    `json:"fragment_percent"`
-	RepeatedPercent int    `json:"repeated_percent"`
+	StepToolsMode    string `json:"step_tools_mode,omitempty"`
+	StepToolsPercent int    `json:"step_tools_percent,omitempty"`
+	Mode             string `json:"mode"`
+	Percent          int    `json:"percent"`
+	FragmentPercent  int    `json:"fragment_percent"`
+	RepeatedPercent  int    `json:"repeated_percent"`
 }
 
 type contextRecallControl struct {
+	stepTools  *stepToolCounterPool
 	path       string
 	engine     *contextRecallEngine
 	policy     atomic.Pointer[contextRecallPolicy]
@@ -34,6 +37,24 @@ type contextRecallControl struct {
 }
 
 type contextRecallEvent struct {
+	ToolsEligible     bool   `json:"tools_eligible,omitempty"`
+	ToolsMode         string `json:"tools_mode,omitempty"`
+	ToolsPercent      int    `json:"tools_percent,omitempty"`
+	ToolsModel        string `json:"tools_model,omitempty"`
+	ToolsAttempted    bool   `json:"tools_attempted,omitempty"`
+	ToolsApplied      bool   `json:"tools_budget_applied,omitempty"`
+	ToolsReason       string `json:"tools_reason,omitempty"`
+	ToolsOriginal     int    `json:"tools_original_estimate,omitempty"`
+	ToolsCount        int    `json:"tools_official_count,omitempty"`
+	ToolsPadded       int    `json:"tools_padded_estimate,omitempty"`
+	ToolsBudgetBefore int    `json:"tools_message_budget_before,omitempty"`
+	ToolsBudgetAfter  int    `json:"tools_message_budget_after,omitempty"`
+	ToolsCacheHit     bool   `json:"tools_cache_hit,omitempty"`
+	ToolsWallUS       int64  `json:"tools_wall_us,omitempty"`
+	ToolsCPUUS        int64  `json:"tools_cpu_us,omitempty"`
+	ToolsRecovered    uint64 `json:"tools_worker_recovered_total,omitempty"`
+	ToolsRepairFailed uint64 `json:"tools_worker_repair_failed_total,omitempty"`
+	TrimSourceHash    string `json:"trim_source_sha256,omitempty"`
 	Kind              string `json:"kind,omitempty"`
 	FragmentPercent   int    `json:"fragment_percent,omitempty"`
 	RepeatedPercent   int    `json:"repeated_percent,omitempty"`
@@ -61,13 +82,19 @@ type contextRecallEvent struct {
 type contextRecallRequestKey struct{}
 
 type contextRecallRequest struct {
-	control        *contextRecallControl
-	ctx            context.Context
-	event          contextRecallEvent
-	triggered      bool
-	chosen         bool
-	fragmentChosen bool
-	repeatedChosen bool
+	stepToolsMode    string
+	stepToolsPercent int
+	stepToolsChosen  bool
+	stepToolsShadow  func(context.Context)
+	stepToolsUntil   time.Time
+	stepToolsCancel  context.CancelFunc
+	control          *contextRecallControl
+	ctx              context.Context
+	event            contextRecallEvent
+	triggered        bool
+	chosen           bool
+	fragmentChosen   bool
+	repeatedChosen   bool
 }
 
 func newContextRecallControl(path string) *contextRecallControl {
@@ -108,6 +135,10 @@ func (c *contextRecallControl) current() contextRecallPolicy {
 			if p.RepeatedPercent < 0 || p.RepeatedPercent > 100 {
 				p.RepeatedPercent = 0
 			}
+			if (p.StepToolsMode != "shadow" && p.StepToolsMode != "apply") || p.StepToolsPercent < 0 || p.StepToolsPercent > 100 {
+				p.StepToolsMode = ""
+				p.StepToolsPercent = 0
+			}
 			c.policy.Store(&p)
 			c.nextReadNS.Store(now + int64(time.Second))
 		}
@@ -120,13 +151,16 @@ func (c *contextRecallControl) current() contextRecallPolicy {
 
 func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	p := c.current()
-	if p.Percent == 0 && p.FragmentPercent == 0 {
+	if p.Percent == 0 && p.FragmentPercent == 0 && p.StepToolsMode == "" {
 		return nil
 	}
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
 		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
 		repeatedChosen: p.RepeatedPercent > 0 && rand.Intn(100) < p.RepeatedPercent,
 		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent}}
+	q.stepToolsMode = p.StepToolsMode
+	q.stepToolsPercent = p.StepToolsPercent
+	q.stepToolsChosen = p.StepToolsPercent > 0 && rand.Intn(100) < p.StepToolsPercent
 	q.event.RepeatedEnabled = q.repeatedChosen
 	switch normalizePath(r.URL.Path) {
 	case "/messages":

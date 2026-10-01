@@ -316,6 +316,11 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	if ctx.Err() != nil {
 		return nil, "deadline"
 	}
+	if enabled, _ := ctx.Value(contextStepToolsGuardKey{}).(bool); enabled {
+		if reason := contextRecallElidedReadGuard(ctx, items, baselineMask, selected); reason != "" {
+			return nil, reason
+		}
+	}
 	kept := []any{}
 	for i, item := range items {
 		if selected[i] {

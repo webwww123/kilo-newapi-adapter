@@ -182,7 +182,8 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	if !ok || len(items) == 0 {
 		return
 	}
-	available := contextInputBudget(payload, profile, responses, stats)
+	defer contextStepToolsTrimWork(payload, recall...)()
+	available := contextInputBudget(payload, profile, responses, stats, recall...)
 	if responses {
 		available -= contextEstimateAnyTokens(payload["instructions"])
 		if contextResponsesHasExternalState(payload) || !contextResponsesItemsSafeToTrim(items) {
@@ -238,7 +239,7 @@ func trimMessagePayload(payload map[string]any, field string, profile contextTri
 	stats.TruncatedItems += trimStats.TruncatedItems
 }
 
-func contextInputBudget(payload map[string]any, profile contextTrimProfile, responses bool, stats *contextTrimStats) int {
+func contextInputBudget(payload map[string]any, profile contextTrimProfile, responses bool, stats *contextTrimStats, recall ...*contextRecallRequest) int {
 	limit := profile.ContextLimit
 	if limit <= 0 {
 		return 0
@@ -270,7 +271,7 @@ func contextInputBudget(payload map[string]any, profile contextTrimProfile, resp
 		stats.OutputClamped = true
 	}
 
-	available := limit - outputBudget - contextEstimateAnyTokens(payload["tools"]) - contextTrimOverheadTokens - profile.SafetyMargin
+	available := limit - outputBudget - contextStepToolsTokens(payload, profile, limit-outputBudget-contextTrimOverheadTokens-profile.SafetyMargin, recall...) - contextTrimOverheadTokens - profile.SafetyMargin
 	if profile.MaxInputTokens > 0 && available > profile.MaxInputTokens {
 		available = profile.MaxInputTokens
 	}

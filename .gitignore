@@ -6,3 +6,4 @@
 .env
 .env.*
 !.env.example
+ops/step-tools/__pycache__/

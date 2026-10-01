@@ -22,9 +22,11 @@ func main() {
 		addr = ":18083"
 	}
 
+	handler, cleanup := adapter.NewHandlerWithCleanup(cfg)
+	defer cleanup()
 	server := &http.Server{
 		Addr:              addr,
-		Handler:           adapter.NewHandler(cfg),
+		Handler:           handler,
 		ReadHeaderTimeout: 15 * time.Second,
 		ReadTimeout:       5 * time.Minute,
 		WriteTimeout:      5 * time.Minute,

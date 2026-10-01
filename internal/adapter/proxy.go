@@ -40,7 +40,9 @@ type Handler struct {
 	contextRecall *contextRecallControl
 }
 
-func NewHandler(cfg Config) http.Handler {
+func NewHandler(cfg Config) http.Handler { h, _ := NewHandlerWithCleanup(cfg); return h }
+
+func NewHandlerWithCleanup(cfg Config) (http.Handler, func()) {
 	base := newBaseHandler(cfg)
 	jsonCompatRequestCompat := base.cfg.KiloAutoRequestCompatEnabled && !base.cfg.KiloAutoReliabilityEnabled
 	jsonCompat := newLingJSONCompatHandlerWithRequestCompat(base, base.cfg.MaxBodyBytes, jsonCompatRequestCompat)
@@ -51,13 +53,13 @@ func NewHandler(cfg Config) http.Handler {
 	if base.cfg.KiloAutoTelemetryEnabled {
 		handler = newKiloAutoTelemetryHandler(handler)
 	}
-	return handler
+	return handler, func() { base.contextRecall.closeStepTools() }
 }
 
 func newBaseHandler(cfg Config) *Handler {
 	cfg = cfg.WithDefaults()
 	var logger *requestLogger
-	if cfg.RequestLogEnabled || strings.TrimSpace(cfg.RequestLogDir) != "" {
+	if !cfg.ContextRecallMetadataOnly && (cfg.RequestLogEnabled || strings.TrimSpace(cfg.RequestLogDir) != "") {
 		logger = newRequestLogger(RequestLogConfig{
 			Dir:       cfg.RequestLogDir,
 			Retention: cfg.RequestLogRetention,
@@ -67,12 +69,14 @@ func newBaseHandler(cfg Config) *Handler {
 			fmt.Printf("request_log_cleanup_error=%v\n", err)
 		}
 	}
+	recall := newContextRecallControl(cfg.ContextRecallConfigPath)
+	recall.startStepTools(cfg.StepToolsBundlePath)
 	return &Handler{
 		cfg:           cfg,
 		logger:        logger,
 		retryWait:     waitForRetry,
 		retryJitter:   defaultRetryJitter,
-		contextRecall: newContextRecallControl(cfg.ContextRecallConfigPath),
+		contextRecall: recall,
 	}
 }
 

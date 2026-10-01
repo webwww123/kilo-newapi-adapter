@@ -59,6 +59,16 @@ jobs:
             git rev-parse HEAD > /tmp/adapter-artifacts/source-commit.txt
             cd /tmp/adapter-artifacts
             sha256sum kilo-newapi-adapter source-commit.txt > SHA256SUMS
+      - run:
+          name: Package and verify isolated Python 3.13 tool counter
+          command: |
+            runtime_image="python:3.13.5-slim-bookworm@sha256:a7cb177dc60dfa77b223192cd0d9e6ce1aac7cf9a569023d68e7c91b6371a718"
+            docker run --rm -v "$PWD:/source:ro" -v /tmp/adapter-artifacts:/artifacts "$runtime_image" python3 /source/ops/step-tools/package.py --output /artifacts/step-tools-runtime
+            CGO_ENABLED=0 GOOS=linux GOARCH=amd64 /usr/local/go/bin/go test -c -o /tmp/adapter-artifacts/step-tools-test ./internal/adapter
+            docker run --rm --network none --memory=1g --cpus=2 -v /tmp/adapter-artifacts:/artifacts:ro -e STEP_TOOLS_TEST_BUNDLE=/artifacts/step-tools-runtime "$runtime_image" sh -c 'ln -s /usr/local/bin/python3 /usr/bin/python3; /artifacts/step-tools-test -test.run "^TestStepToolsRealBundle$" -test.v -test.timeout 45s'
+            tar --exclude=__pycache__ -czf /tmp/adapter-artifacts/step-tools-runtime.tar.gz -C /tmp/adapter-artifacts step-tools-runtime
+            cd /tmp/adapter-artifacts
+            sha256sum kilo-newapi-adapter source-commit.txt step-tools-runtime.tar.gz step-tools-test > SHA256SUMS
       - store_artifacts:
           path: /tmp/adapter-artifacts
           destination: kilo-newapi-adapter
