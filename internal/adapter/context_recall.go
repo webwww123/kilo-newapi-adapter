@@ -280,6 +280,17 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		cutoff = 0
 	}
 	oldAdded := 0
+	// Required task statements and complete recent tool units can already have
+	// brought back older items absent from the baseline. Charge them before
+	// choosing optional evidence, so a fitting smaller unit can still win.
+	for index, kept := range selected {
+		if kept && !baselineMask[index] && index < cutoff {
+			oldAdded += costs[index]
+		}
+	}
+	if oldAdded > oldAllowance {
+		return nil, "old_share_limit"
+	}
 	recalled := false
 	for _, i := range ranked {
 		addition := 0
