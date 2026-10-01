@@ -90,6 +90,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		recall = h.contextRecall.begin(r)
 		if recall != nil {
 			r = r.WithContext(context.WithValue(r.Context(), contextRecallRequestKey{}, recall))
+			if h.cfg.ContextRecallResponseIdentity {
+				lw.observeWrite = recall.observeResponseWrite
+			}
 		}
 	}
 
@@ -1632,6 +1635,7 @@ type loggingResponseWriter struct {
 	http.ResponseWriter
 	status       *int
 	bytesWritten *int64
+	observeWrite func([]byte, int, error)
 }
 
 func (w *loggingResponseWriter) WriteHeader(status int) {
@@ -1642,6 +1646,9 @@ func (w *loggingResponseWriter) WriteHeader(status int) {
 func (w *loggingResponseWriter) Write(data []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(data)
 	*w.bytesWritten += int64(n)
+	if w.observeWrite != nil {
+		w.observeWrite(data, n, err)
+	}
 	return n, err
 }
 

@@ -37,51 +37,57 @@ type contextRecallControl struct {
 }
 
 type contextRecallEvent struct {
-	ToolsEligible     bool   `json:"tools_eligible,omitempty"`
-	ToolsMode         string `json:"tools_mode,omitempty"`
-	ToolsPercent      int    `json:"tools_percent,omitempty"`
-	ToolsModel        string `json:"tools_model,omitempty"`
-	ToolsAttempted    bool   `json:"tools_attempted,omitempty"`
-	ToolsApplied      bool   `json:"tools_budget_applied,omitempty"`
-	ToolsReason       string `json:"tools_reason,omitempty"`
-	ToolsOriginal     int    `json:"tools_original_estimate,omitempty"`
-	ToolsCount        int    `json:"tools_official_count,omitempty"`
-	ToolsPadded       int    `json:"tools_padded_estimate,omitempty"`
-	ToolsBudgetBefore int    `json:"tools_message_budget_before,omitempty"`
-	ToolsBudgetAfter  int    `json:"tools_message_budget_after,omitempty"`
-	ToolsCacheHit     bool   `json:"tools_cache_hit,omitempty"`
-	ToolsWallUS       int64  `json:"tools_wall_us,omitempty"`
-	ToolsCPUUS        int64  `json:"tools_cpu_us,omitempty"`
-	ToolsRecovered    uint64 `json:"tools_worker_recovered_total,omitempty"`
-	ToolsRepairFailed uint64 `json:"tools_worker_repair_failed_total,omitempty"`
-	TrimSourceHash    string `json:"trim_source_sha256,omitempty"`
-	Kind              string `json:"kind,omitempty"`
-	FragmentPercent   int    `json:"fragment_percent,omitempty"`
-	RepeatedPercent   int    `json:"repeated_percent,omitempty"`
-	RepeatedEnabled   bool   `json:"repeated_enabled,omitempty"`
-	RepeatedAttempted bool   `json:"repeated_attempted,omitempty"`
-	RepeatedMatched   bool   `json:"repeated_matched,omitempty"`
-	RepeatedApplied   bool   `json:"repeated_applied,omitempty"`
-	Version           int    `json:"version"`
-	Timestamp         string `json:"timestamp"`
-	RequestHash       string `json:"request_hash,omitempty"`
-	Protocol          string `json:"protocol"`
-	Mode              string `json:"mode"`
-	Percent           int    `json:"percent"`
-	Reason            string `json:"reason"`
-	Applied           bool   `json:"applied"`
-	InputBytes        int    `json:"input_bytes"`
-	InputItems        int    `json:"input_items"`
-	CandidateItems    int    `json:"candidate_items,omitempty"`
-	Budget            int    `json:"budget"`
-	SelectMS          int64  `json:"select_ms"`
-	Status            int    `json:"status"`
-	DurationMS        int64  `json:"duration_ms"`
+	ResponseBodySHA256      string `json:"response_body_sha256,omitempty"`
+	ResponseBodyBytes       int64  `json:"response_body_bytes,omitempty"`
+	ResponseHashLimited     bool   `json:"response_hash_limited,omitempty"`
+	ResponseWriteFailed     bool   `json:"response_write_failed,omitempty"`
+	ResponseRequestCanceled bool   `json:"response_request_canceled,omitempty"`
+	ToolsEligible           bool   `json:"tools_eligible,omitempty"`
+	ToolsMode               string `json:"tools_mode,omitempty"`
+	ToolsPercent            int    `json:"tools_percent,omitempty"`
+	ToolsModel              string `json:"tools_model,omitempty"`
+	ToolsAttempted          bool   `json:"tools_attempted,omitempty"`
+	ToolsApplied            bool   `json:"tools_budget_applied,omitempty"`
+	ToolsReason             string `json:"tools_reason,omitempty"`
+	ToolsOriginal           int    `json:"tools_original_estimate,omitempty"`
+	ToolsCount              int    `json:"tools_official_count,omitempty"`
+	ToolsPadded             int    `json:"tools_padded_estimate,omitempty"`
+	ToolsBudgetBefore       int    `json:"tools_message_budget_before,omitempty"`
+	ToolsBudgetAfter        int    `json:"tools_message_budget_after,omitempty"`
+	ToolsCacheHit           bool   `json:"tools_cache_hit,omitempty"`
+	ToolsWallUS             int64  `json:"tools_wall_us,omitempty"`
+	ToolsCPUUS              int64  `json:"tools_cpu_us,omitempty"`
+	ToolsRecovered          uint64 `json:"tools_worker_recovered_total,omitempty"`
+	ToolsRepairFailed       uint64 `json:"tools_worker_repair_failed_total,omitempty"`
+	TrimSourceHash          string `json:"trim_source_sha256,omitempty"`
+	Kind                    string `json:"kind,omitempty"`
+	FragmentPercent         int    `json:"fragment_percent,omitempty"`
+	RepeatedPercent         int    `json:"repeated_percent,omitempty"`
+	RepeatedEnabled         bool   `json:"repeated_enabled,omitempty"`
+	RepeatedAttempted       bool   `json:"repeated_attempted,omitempty"`
+	RepeatedMatched         bool   `json:"repeated_matched,omitempty"`
+	RepeatedApplied         bool   `json:"repeated_applied,omitempty"`
+	Version                 int    `json:"version"`
+	Timestamp               string `json:"timestamp"`
+	RequestHash             string `json:"request_hash,omitempty"`
+	Protocol                string `json:"protocol"`
+	Mode                    string `json:"mode"`
+	Percent                 int    `json:"percent"`
+	Reason                  string `json:"reason"`
+	Applied                 bool   `json:"applied"`
+	InputBytes              int    `json:"input_bytes"`
+	InputItems              int    `json:"input_items"`
+	CandidateItems          int    `json:"candidate_items,omitempty"`
+	Budget                  int    `json:"budget"`
+	SelectMS                int64  `json:"select_ms"`
+	Status                  int    `json:"status"`
+	DurationMS              int64  `json:"duration_ms"`
 }
 
 type contextRecallRequestKey struct{}
 
 type contextRecallRequest struct {
+	responseIdentity *recallResponseIdentity
 	stepToolsMode    string
 	stepToolsPercent int
 	stepToolsChosen  bool
@@ -228,6 +234,7 @@ func (q *contextRecallRequest) finish(status int, elapsed time.Duration) {
 	if q == nil || !q.triggered {
 		return
 	}
+	q.finishResponseIdentity()
 	q.event.Status = status
 	q.event.DurationMS = elapsed.Milliseconds()
 	q.event.Timestamp = time.Now().UTC().Format(time.RFC3339Nano)
