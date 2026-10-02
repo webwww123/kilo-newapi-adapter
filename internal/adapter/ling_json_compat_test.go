@@ -607,6 +607,9 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		{name: "inkling_schema_stream", requestModel: "kilo/thinkingmachines/inkling:free", upstreamModel: "thinkingmachines/inkling:free", publicModel: "kilo/thinkingmachines/inkling:free", format: schemaFormat, stream: true, targetBudget: true},
 		{name: "spacebunny_object", requestModel: "kilo/stealth/space-bunny-alpha", upstreamModel: "stealth/space-bunny-alpha", publicModel: "kilo/stealth/space-bunny-alpha", format: `{"type":"json_object"}`, targetBudget: true},
 		{name: "spacebunny_schema_stream", requestModel: "kilo/stealth/space-bunny-alpha", upstreamModel: "stealth/space-bunny-alpha", publicModel: "kilo/stealth/space-bunny-alpha", format: schemaFormat, stream: true, targetBudget: true},
+		{name: "apodex_schema", requestModel: "apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: schemaFormat, targetBudget: true},
+		{name: "apodex_schema_stream", requestModel: "kilo/apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: schemaFormat, stream: true, targetBudget: true},
+		{name: "apodex_object", requestModel: "kilo/apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: `{"type":"json_object"}`, targetBudget: true},
 	}
 
 	for _, tc := range tests {

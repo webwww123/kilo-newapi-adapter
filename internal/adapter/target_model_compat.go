@@ -12,6 +12,7 @@ const (
 	thinkingMachinesInklingSmallFreeModel = "thinkingmachines/inkling-small:free"
 	thinkingMachinesInklingFreeModel      = "thinkingmachines/inkling:free"
 	spaceBunnyAlphaModel                  = "stealth/space-bunny-alpha"
+	apodexMiniFreeModel                   = "apodex/apodex-1.1-mini:free"
 	targetModelMinOutputTokens            = 8192
 	targetMessagesThinkingTokens          = 1024
 	targetMinimalReasoningEffort          = "minimal"
@@ -49,7 +50,8 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 		dotsStudioNotePreviewFreeModel,
 		thinkingMachinesInklingSmallFreeModel,
 		thinkingMachinesInklingFreeModel,
-		spaceBunnyAlphaModel:
+		spaceBunnyAlphaModel,
+		apodexMiniFreeModel:
 	default:
 		// Nemotron-family free models leak truncated reasoning into content
 		// when thinking consumes the output budget; force reasoning off

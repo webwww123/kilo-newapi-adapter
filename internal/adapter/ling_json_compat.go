@@ -43,6 +43,7 @@ const (
 	inklingSmallJSONPublicModel      = publicModelPrefix + thinkingMachinesInklingSmallFreeModel
 	inklingJSONPublicModel           = publicModelPrefix + thinkingMachinesInklingFreeModel
 	spaceBunnyJSONPublicModel        = publicModelPrefix + spaceBunnyAlphaModel
+	apodexMiniJSONPublicModel        = publicModelPrefix + apodexMiniFreeModel
 	lingJSONMaxSchemaBytes           = 64 << 10
 	lingJSONMaxRepairBytes           = 64 << 10
 	lingJSONFirstOutputFloor         = 256
@@ -525,6 +526,8 @@ func jsonCompatModelProfile(model string) (string, string, bool) {
 		return "inkling", inklingJSONPublicModel, true
 	case spaceBunnyJSONPublicModel, spaceBunnyAlphaModel:
 		return "space_bunny", spaceBunnyJSONPublicModel, true
+	case apodexMiniJSONPublicModel, apodexMiniFreeModel:
+		return "apodex_mini", apodexMiniJSONPublicModel, true
 	default:
 		return "", "", false
 	}
