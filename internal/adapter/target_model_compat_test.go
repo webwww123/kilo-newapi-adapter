@@ -111,6 +111,30 @@ func TestTargetFreeModelsNormalizeOutputBudgetsAcrossProtocols(t *testing.T) {
 			wantLimit:  8192,
 			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
 		},
+		{
+			name:       "apodex chat raises a low budget",
+			path:       "/v1/chat/completions",
+			body:       `{"model":"kilo/apodex/apodex-1.1-mini:free","messages":[{"role":"user","content":"hi"}],"max_tokens":64}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
+		},
+		{
+			name:       "apodex responses preserves a higher budget",
+			path:       "/v1/responses",
+			body:       `{"model":"kilo/apodex/apodex-1.1-mini:free","input":"hi","max_tokens":16000,"max_output_tokens":64}`,
+			field:      "max_output_tokens",
+			wantLimit:  16000,
+			absentKeys: []string{"max_tokens", "max_completion_tokens"},
+		},
+		{
+			name:       "apodex messages adds the default floor",
+			path:       "/v1/messages",
+			body:       `{"model":"kilo/apodex/apodex-1.1-mini:free","messages":[{"role":"user","content":"hi"}]}`,
+			field:      "max_tokens",
+			wantLimit:  8192,
+			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -146,6 +170,7 @@ func TestTargetFreeModelsForceMinimumReasoningAcrossProtocols(t *testing.T) {
 		"kilo/thinkingmachines/inkling-small:free",
 		"kilo/thinkingmachines/inkling:free",
 		"kilo/stealth/space-bunny-alpha",
+		"kilo/apodex/apodex-1.1-mini:free",
 	} {
 		t.Run(model+" chat", func(t *testing.T) {
 			before := len(*calls)
@@ -356,6 +381,10 @@ func TestTargetFreeModelContextProfiles(t *testing.T) {
 		{
 			model: "stealth/space-bunny-alpha",
 			want:  contextTrimProfile{ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000, DefaultOutputTokens: 8192, MaxOutputTokens: 524288},
+		},
+		{
+			model: "apodex/apodex-1.1-mini:free",
+			want:  contextTrimProfile{ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 235929},
 		},
 	}
 	for _, tc := range tests {

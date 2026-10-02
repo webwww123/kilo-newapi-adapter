@@ -53,6 +53,7 @@ var freeContextTrimProfiles = map[string]contextTrimProfile{
 	"thinkingmachines/inkling-small:free":                {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 262144},
 	"thinkingmachines/inkling:free":                      {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 262144},
 	"stealth/space-bunny-alpha":                          {ContextLimit: 1000000, SafetyMargin: 40000, MaxInputTokens: 900000, DefaultOutputTokens: 8192, MaxOutputTokens: 524288},
+	"apodex/apodex-1.1-mini:free":                        {ContextLimit: 262144, SafetyMargin: 40000, MaxInputTokens: 200000, DefaultOutputTokens: 8192, MaxOutputTokens: 235929},
 }
 
 func trimFreeModelContext(body []byte, upstreamPath string, recall ...*contextRecallRequest) ([]byte, contextTrimStats, error) {
