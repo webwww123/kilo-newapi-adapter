@@ -25,6 +25,9 @@ type targetModelCompatStats struct {
 	ReasoningNormalized        bool
 	ForcedToolChoiceNormalized bool
 	DeferredToolsExpanded      int
+	ToolArgsRepaired           int
+	MidSystemConverted         int
+	ToolInputRepaired          int
 }
 
 func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, targetModelCompatStats, error) {
@@ -76,8 +79,12 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	if model == spaceBunnyAlphaModel && path == "/messages" {
 		stats.DeferredToolsExpanded = normalizeSpaceBunnyDeferredTools(payload)
 	}
+	if model == apodexMiniFreeModel {
+		normalizeApodexMessageHistory(payload, path, &stats)
+	}
 
-	stats.Changed = stats.OutputBudgetNormalized || stats.ReasoningNormalized || stats.ForcedToolChoiceNormalized || stats.DeferredToolsExpanded > 0
+	stats.Changed = stats.OutputBudgetNormalized || stats.ReasoningNormalized || stats.ForcedToolChoiceNormalized || stats.DeferredToolsExpanded > 0 ||
+		stats.ToolArgsRepaired > 0 || stats.MidSystemConverted > 0 || stats.ToolInputRepaired > 0
 	if !stats.Changed {
 		return body, stats, nil
 	}
@@ -200,4 +207,165 @@ func normalizeHY3ForcedFunctionChoice(payload map[string]any) bool {
 	payload["tools"] = []any{selected}
 	payload["tool_choice"] = "required"
 	return true
+}
+
+const apodexMidSystemPrefix = "[System note]\n"
+
+// The apodex upstream (Kilo→OpenRouter→Novita) rejects shapes every other
+// target tolerates: non-string or non-JSON tool call arguments, system or
+// developer messages after the first non-system message, and string
+// tool_use input blocks on Messages history. Repairs mirror the existing
+// tool-history normalization style: count every fix and reserialize only
+// when something actually changed.
+func normalizeApodexMessageHistory(payload map[string]any, path string, stats *targetModelCompatStats) {
+	switch path {
+	case "/chat/completions":
+		repairApodexChatToolArguments(payload, stats)
+		convertApodexMidConversationSystem(payload, stats)
+	case "/messages":
+		repairApodexMessagesToolInputs(payload, stats)
+	}
+}
+
+func repairApodexChatToolArguments(payload map[string]any, stats *targetModelCompatStats) {
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok || message["role"] != "assistant" {
+			continue
+		}
+		calls, ok := message["tool_calls"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawCall := range calls {
+			call, ok := rawCall.(map[string]any)
+			if !ok {
+				continue
+			}
+			function, ok := call["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if repaired, changed := apodexToolArgumentsValue(function["arguments"]); changed {
+				function["arguments"] = repaired
+				stats.ToolArgsRepaired++
+			}
+		}
+	}
+}
+
+func apodexToolArgumentsValue(value any) (any, bool) {
+	switch arguments := value.(type) {
+	case string:
+		if strings.TrimSpace(arguments) == "" {
+			return "{}", true
+		}
+		if json.Valid([]byte(arguments)) {
+			return nil, false
+		}
+		wrapped, err := json.Marshal(map[string]any{"_raw_arguments": arguments})
+		if err != nil {
+			return nil, false
+		}
+		return string(wrapped), true
+	case map[string]any, []any:
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return nil, false
+		}
+		return string(encoded), true
+	default:
+		return nil, false
+	}
+}
+
+func convertApodexMidConversationSystem(payload map[string]any, stats *targetModelCompatStats) {
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return
+	}
+	historyStarted := false
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		role, _ := message["role"].(string)
+		if historyStarted && (role == "system" || role == "developer") {
+			message["role"] = "user"
+			prependApodexSystemNote(message)
+			stats.MidSystemConverted++
+			continue
+		}
+		if role != "system" && role != "developer" {
+			historyStarted = true
+		}
+	}
+}
+
+func prependApodexSystemNote(message map[string]any) {
+	switch content := message["content"].(type) {
+	case string:
+		message["content"] = apodexMidSystemPrefix + content
+	case []any:
+		insert := 0
+		for i, rawBlock := range content {
+			if block, ok := rawBlock.(map[string]any); ok && block["type"] == "text" {
+				insert = i
+				break
+			}
+		}
+		note := map[string]any{"type": "text", "text": apodexMidSystemPrefix}
+		out := make([]any, 0, len(content)+1)
+		out = append(out, content[:insert]...)
+		out = append(out, note)
+		message["content"] = append(out, content[insert:]...)
+	case nil:
+		message["content"] = apodexMidSystemPrefix
+	default:
+		message["content"] = apodexMidSystemPrefix + fmt.Sprint(content)
+	}
+}
+
+func repairApodexMessagesToolInputs(payload map[string]any, stats *targetModelCompatStats) {
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok || message["role"] != "assistant" {
+			continue
+		}
+		blocks, ok := message["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawBlock := range blocks {
+			block, ok := rawBlock.(map[string]any)
+			if !ok || block["type"] != "tool_use" {
+				continue
+			}
+			input, ok := block["input"].(string)
+			if !ok {
+				continue
+			}
+			block["input"] = apodexToolInputValue(input)
+			stats.ToolInputRepaired++
+		}
+	}
+}
+
+func apodexToolInputValue(raw string) any {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]any{}
+	}
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
+		if object, ok := parsed.(map[string]any); ok {
+			return object
+		}
+	}
+	return map[string]any{"_raw_input": raw}
 }

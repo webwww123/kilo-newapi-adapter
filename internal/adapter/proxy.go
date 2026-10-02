@@ -328,8 +328,8 @@ func (h *Handler) handleProxy(w http.ResponseWriter, r *http.Request, upstreamPa
 		return
 	}
 	if targetStats.Changed {
-		fmt.Printf("kilo_target_compat path=%s model=%s output_budget_normalized=%t reasoning_normalized=%t forced_tool_choice_normalized=%t deferred_tools_expanded=%d\n",
-			upstreamPath, targetStats.Model, targetStats.OutputBudgetNormalized, targetStats.ReasoningNormalized, targetStats.ForcedToolChoiceNormalized, targetStats.DeferredToolsExpanded)
+		fmt.Printf("kilo_target_compat path=%s model=%s output_budget_normalized=%t reasoning_normalized=%t forced_tool_choice_normalized=%t deferred_tools_expanded=%d tool_args_repaired=%d mid_system_converted=%d tool_input_repaired=%d\n",
+			upstreamPath, targetStats.Model, targetStats.OutputBudgetNormalized, targetStats.ReasoningNormalized, targetStats.ForcedToolChoiceNormalized, targetStats.DeferredToolsExpanded, targetStats.ToolArgsRepaired, targetStats.MidSystemConverted, targetStats.ToolInputRepaired)
 	}
 
 	body, jsonModeDowngraded, err := downgradeFreeModelJSONMode(body, upstreamPath)

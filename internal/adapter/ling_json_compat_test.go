@@ -609,7 +609,6 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 		{name: "spacebunny_schema_stream", requestModel: "kilo/stealth/space-bunny-alpha", upstreamModel: "stealth/space-bunny-alpha", publicModel: "kilo/stealth/space-bunny-alpha", format: schemaFormat, stream: true, targetBudget: true},
 		{name: "apodex_schema", requestModel: "apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: schemaFormat, targetBudget: true},
 		{name: "apodex_schema_stream", requestModel: "kilo/apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: schemaFormat, stream: true, targetBudget: true},
-		{name: "apodex_object", requestModel: "kilo/apodex/apodex-1.1-mini:free", upstreamModel: "apodex/apodex-1.1-mini:free", publicModel: "kilo/apodex/apodex-1.1-mini:free", format: `{"type":"json_object"}`, targetBudget: true},
 	}
 
 	for _, tc := range tests {
@@ -667,6 +666,43 @@ func TestKiloTargetFreeModelsRepairStructuredJSONWithoutForwardingFormat(t *test
 				t.Fatalf("public model missing: %s", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestApodexJSONObjectPassesThroughNatively(t *testing.T) {
+	handler, calls, closeUpstream := newLingJSONCompatTestHandler(t, func(_ int, payload map[string]any) string {
+		model, _ := payload["model"].(string)
+		return jsonCompatTestCompletion(t, model, "prose answer, not JSON")
+	})
+	defer closeUpstream()
+
+	rec := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/apodex/apodex-1.1-mini:free","max_tokens":64,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(*calls) != 1 {
+		t.Fatalf("upstream calls=%d, want 1 passthrough call: %#v", len(*calls), *calls)
+	}
+	call := (*calls)[0]
+	format, ok := call["response_format"].(map[string]any)
+	if call["model"] != apodexMiniFreeModel || !ok || format["type"] != "json_object" {
+		t.Fatalf("json_object request was not forwarded verbatim: %#v", call)
+	}
+	if content := lingJSONTestResponseContent(t, rec.Body.Bytes()); content != "prose answer, not JSON" {
+		t.Fatalf("passthrough content=%q body=%s", content, rec.Body.String())
+	}
+
+	stream := postJSON(t, handler, "/v1/chat/completions", `{"model":"kilo/apodex/apodex-1.1-mini:free","stream":true,"response_format":{"type":"json_object"},"messages":[{"role":"user","content":"return data"}]}`)
+	if stream.Code != http.StatusOK {
+		t.Fatalf("stream status=%d body=%s", stream.Code, stream.Body.String())
+	}
+	if len(*calls) != 2 {
+		t.Fatalf("stream upstream calls=%d, want 1 more passthrough call", len(*calls))
+	}
+	streamCall := (*calls)[1]
+	streamFormat, ok := streamCall["response_format"].(map[string]any)
+	if streamCall["stream"] != true || !ok || streamFormat["type"] != "json_object" {
+		t.Fatalf("stream json_object request was not forwarded verbatim: %#v", streamCall)
 	}
 }
 

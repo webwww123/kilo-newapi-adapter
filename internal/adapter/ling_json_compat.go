@@ -456,6 +456,11 @@ func parseLingJSONRequest(body []byte) (map[string]any, lingJSONSpec, bool, erro
 	spec.Kind = strings.ToLower(strings.TrimSpace(fmt.Sprint(format["type"])))
 	switch spec.Kind {
 	case lingJSONObjectFormat:
+		if spec.Profile == "apodex_mini" {
+			// Novita supports json_object natively; skip the compat loop and
+			// forward the original request, response_format included.
+			return payload, spec, false, nil
+		}
 		return payload, spec, true, nil
 	case lingJSONSchemaFormat:
 		container, ok := format["json_schema"].(map[string]any)
