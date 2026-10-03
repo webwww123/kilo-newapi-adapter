@@ -475,8 +475,12 @@ func contextResponsesItemsSafeToTrim(items []any) bool {
 				return false
 			}
 			for id := range ids {
-				if _, exists := callIndexes[id]; exists {
-					return false
+				if previous, exists := callIndexes[id]; exists {
+					// Reused IDs are unambiguous only after the earlier turn
+					// completed. Keep both turns and their original IDs.
+					if outputIndexes[id] <= previous {
+						return false
+					}
 				}
 				callIndexes[id] = index
 			}
@@ -486,7 +490,11 @@ func contextResponsesItemsSafeToTrim(items []any) bool {
 			if id == "" {
 				return false
 			}
-			if _, exists := outputIndexes[id]; exists {
+			callIndex, exists := callIndexes[id]
+			if !exists || callIndex >= index {
+				return false
+			}
+			if previous, exists := outputIndexes[id]; exists && previous >= callIndex {
 				return false
 			}
 			outputIndexes[id] = index
@@ -555,8 +563,11 @@ func contextToolHistorySafeToTrim(items []any) bool {
 			return false
 		}
 		for id := range openAIIDs {
-			if _, exists := openAICallIndexes[id]; exists {
-				return false
+			if previous, exists := openAICallIndexes[id]; exists {
+				prior, _ := items[previous].(map[string]any)
+				if message["type"] != "function_call" || prior["type"] != "function_call" || openAIResultIndexes[id] <= previous {
+					return false
+				}
 			}
 			openAICallIndexes[id] = index
 		}
@@ -566,8 +577,11 @@ func contextToolHistorySafeToTrim(items []any) bool {
 			if id == "" {
 				return false
 			}
-			if _, exists := openAIResultIndexes[id]; exists {
-				return false
+			if previous, exists := openAIResultIndexes[id]; exists {
+				prior, _ := items[previous].(map[string]any)
+				if message["type"] != "function_call_output" || prior["type"] != "function_call_output" || openAICallIndexes[id] <= previous {
+					return false
+				}
 			}
 			openAIResultIndexes[id] = index
 		}
