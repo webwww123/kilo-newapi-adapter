@@ -104,11 +104,11 @@ func TestTargetFreeModelsNormalizeOutputBudgetsAcrossProtocols(t *testing.T) {
 			absentKeys: []string{"max_tokens", "max_completion_tokens"},
 		},
 		{
-			name:       "space bunny messages adds the default floor",
+			name:       "space bunny messages reserves a complete answer default",
 			path:       "/v1/messages",
 			body:       `{"model":"kilo/stealth/space-bunny-alpha","messages":[{"role":"user","content":"hi"}]}`,
 			field:      "max_tokens",
-			wantLimit:  8192,
+			wantLimit:  32768,
 			absentKeys: []string{"max_completion_tokens", "max_output_tokens"},
 		},
 	}

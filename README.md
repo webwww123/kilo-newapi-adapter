@@ -74,6 +74,16 @@ KILO_AUTO_TELEMETRY_ENABLED=false
 
 ## Free Model Context Trimming
 
+Completed Responses tool turns may reuse a call ID after its previous result.
+Trimming keeps each complete occurrence and its original arguments/results;
+overlapping calls, duplicate results, missing partners, and external continuation
+state keep the existing conservative guard.
+
+For Space Bunny only, requests without a positive output limit receive 32768
+tokens instead of inheriting the 8192 reasoning floor. Explicit limits retain
+the existing normalization and minimum behavior. Context fitting reserves the
+actual forwarded allowance; this adds no continuation call or automatic retry.
+
 `kilo/inclusionai/ling-3.0-flash-vl:free` uses a 262144-token context profile,
 40000-token headroom and a 200000-token input budget. It preserves native image
 parts, complete tool turns and caller output limits. The paid VL model is unchanged.

@@ -13,6 +13,7 @@ const (
 	thinkingMachinesInklingFreeModel      = "thinkingmachines/inkling:free"
 	spaceBunnyAlphaModel                  = "stealth/space-bunny-alpha"
 	targetModelMinOutputTokens            = 8192
+	spaceBunnyDefaultOutputTokens         = 32768
 	targetMessagesThinkingTokens          = 1024
 	targetMinimalReasoningEffort          = "minimal"
 )
@@ -65,7 +66,13 @@ func normalizeTargetFreeModelRequest(body []byte, upstreamPath string) ([]byte, 
 	if normalizeTargetReasoning(payload, path, reasoningEffort, messagesThinking) {
 		stats.ReasoningNormalized = true
 	}
-	if normalizeOutputBudget && normalizeTargetOutputBudget(payload, path, targetModelMinOutputTokens) {
+	defaultOutputTokens := targetModelMinOutputTokens
+	if model == spaceBunnyAlphaModel {
+		// Missing client limits used to inherit the reasoning floor, cutting
+		// long answers off at 8192 tokens even when context had ample space.
+		defaultOutputTokens = spaceBunnyDefaultOutputTokens
+	}
+	if normalizeOutputBudget && normalizeTargetOutputBudget(payload, path, targetModelMinOutputTokens, defaultOutputTokens) {
 		stats.OutputBudgetNormalized = true
 	}
 	if model == tencentHY3FreeModel && path == "/chat/completions" && normalizeHY3ForcedFunctionChoice(payload) {
@@ -123,7 +130,7 @@ func normalizeTargetReasoning(payload map[string]any, path string, reasoningEffo
 	return changed
 }
 
-func normalizeTargetOutputBudget(payload map[string]any, path string, minimum int) bool {
+func normalizeTargetOutputBudget(payload map[string]any, path string, minimum, defaultBudget int) bool {
 	canonical := ""
 	switch path {
 	case "/chat/completions", "/messages":
@@ -134,12 +141,17 @@ func normalizeTargetOutputBudget(payload map[string]any, path string, minimum in
 		return false
 	}
 
-	budget := float64(minimum)
+	budget := float64(0)
 	fields := []string{"max_tokens", "max_completion_tokens", "max_output_tokens"}
 	for _, field := range fields {
 		if value, ok := payload[field].(float64); ok && value > budget {
 			budget = value
 		}
+	}
+	if budget <= 0 {
+		budget = float64(defaultBudget)
+	} else if budget < float64(minimum) {
+		budget = float64(minimum)
 	}
 
 	changed := false
