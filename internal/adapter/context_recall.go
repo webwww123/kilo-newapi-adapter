@@ -20,7 +20,7 @@ type contextRecallEngine struct {
 }
 
 func newContextRecallEngine() *contextRecallEngine {
-	return &contextRecallEngine{slots: make(chan struct{}, 2), maxBytes: 12 << 20, maxItems: 4096, timeout: 250 * time.Millisecond}
+	return &contextRecallEngine{slots: make(chan struct{}, 2), maxBytes: 12 << 20, maxItems: 16384, timeout: 250 * time.Millisecond}
 }
 
 type contextRecallTurn struct {
@@ -727,7 +727,7 @@ func contextRecallSupported(value any) bool {
 	case map[string]any:
 		if kind, ok := v["type"].(string); ok {
 			switch kind {
-			case "", "text", "input_text", "output_text", "message", "tool_use", "tool_result", "function", "function_call", "function_call_output":
+			case "", "text", "input_text", "output_text", "message", "tool_use", "tool_result", "function", "function_call", "function_call_output", "thinking", "redacted_thinking", "image_url":
 			default:
 				return false
 			}
@@ -827,7 +827,7 @@ func contextRecallMatchingTerms(ctx context.Context, text string, query map[stri
 
 func contextRecallBroadQuery(text string) bool {
 	lower := strings.ToLower(text)
-	for _, phrase := range []string{"every ", "all records", "all available", "entire history", "complete conversation", "whole conversation", "whole document", "summarize", "summarise", "全文", "所有记录", "所有材料", "全部记录", "逐一", "汇总", "总结"} {
+	for _, phrase := range []string{"all records", "entire history", "complete conversation", "whole conversation", "whole document", "全文", "所有记录", "所有材料", "全部记录"} {
 		if strings.Contains(lower, phrase) {
 			return true
 		}
