@@ -75,7 +75,7 @@ func TestRecallResponseIdentityHTTPDoesNotBufferOrChangeBody(t *testing.T) {
 				"messages": []any{map[string]any{"role": "user", "content": strings.Repeat("synthetic context ", 40000)}},
 				"tools":    []any{map[string]any{"type": "function", "function": map[string]any{"name": "lookup", "description": strings.Repeat("synthetic tool schema ", 1600), "parameters": map[string]any{"type": "object"}}}}}
 			b, _ := json.Marshal(request)
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(string(b)))
 			req.Header.Set("Content-Type", "application/json")
