@@ -57,8 +57,13 @@ func needleExamCorpus(t *testing.T) string {
 		}
 	}
 	corpus := strings.Join(parts, "")
-	if len(corpus) < 4*1000000+200 {
+	if len(corpus) < 2000 {
 		t.Fatalf("filler corpus too small: %d", len(corpus))
+	}
+	// CI images ship only a partial stdlib; retile the collected real text
+	// deterministically until the filler reaches exam size.
+	for len(corpus) < 4*1000000+200 {
+		corpus += "\n# ==== corpus tiling ====\n" + corpus
 	}
 	return corpus
 }
