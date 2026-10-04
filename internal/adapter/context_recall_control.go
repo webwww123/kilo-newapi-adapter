@@ -82,6 +82,18 @@ type contextRecallEvent struct {
 	SelectMS                int64  `json:"select_ms"`
 	Status                  int    `json:"status"`
 	DurationMS              int64  `json:"duration_ms"`
+	QTerms                  int    `json:"q_terms"`
+	CutTerms                int    `json:"cut_terms"`
+	BaselineHit             int    `json:"baseline_hit"`
+	FinalHit                int    `json:"final_hit"`
+	MetricMS                int64  `json:"metric_ms"`
+}
+
+func (e *contextRecallEvent) setMetric(m *contextRecallMetric) {
+	if m == nil {
+		return
+	}
+	e.QTerms, e.CutTerms, e.BaselineHit, e.FinalHit, e.MetricMS = m.q, m.cut, m.baseHit, m.finalHit, m.ms
 }
 
 type contextRecallRequestKey struct{}
@@ -101,6 +113,7 @@ type contextRecallRequest struct {
 	chosen           bool
 	fragmentChosen   bool
 	repeatedChosen   bool
+	disableMetric    bool
 }
 
 func newContextRecallControl(path string) *contextRecallControl {
@@ -163,7 +176,8 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
 		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
 		repeatedChosen: p.RepeatedPercent > 0 && rand.Intn(100) < p.RepeatedPercent,
-		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent}}
+		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent,
+			QTerms: -1, CutTerms: -1, BaselineHit: -1, FinalHit: -1, MetricMS: -1}}
 	q.stepToolsMode = p.StepToolsMode
 	q.stepToolsPercent = p.StepToolsPercent
 	q.stepToolsChosen = p.StepToolsPercent > 0 && rand.Intn(100) < p.StepToolsPercent
@@ -217,15 +231,25 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 		}
 	}()
 	ctx, trace := q.repeatedContext()
-	kept, q.event.Reason = q.control.engine.choose(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, baseline...)
+	metric := newContextRecallMetric()
+	if q.disableMetric {
+		metric = nil
+	}
+	kept, q.event.Reason = q.control.engine.chooseMetric(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, metric, baseline...)
 	q.recordRepeated(trace, q.event.Reason == "selected" && q.event.Mode == "apply")
 	if q.event.Reason != "selected" {
+		metric.finishFinal("", true)
+		q.event.setMetric(metric)
 		return nil, false
 	}
 	q.event.CandidateItems = len(kept)
 	if q.event.Mode != "apply" {
+		metric.finishFinal("", true)
+		q.event.setMetric(metric)
 		return nil, false
 	}
+	metric.finishFinal(contextRecallJoinedText(kept), false)
+	q.event.setMetric(metric)
 	q.event.Applied = true
 	return kept, true
 }

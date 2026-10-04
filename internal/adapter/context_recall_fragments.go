@@ -129,11 +129,19 @@ func (q *contextRecallRequest) selectText(original, baseline string) (out string
 		}
 	}()
 	ctx, trace := q.repeatedContext()
-	out, q.event.Reason = q.control.engine.recallText(ctx, original, baseline)
+	metric := newContextRecallMetric()
+	if q.disableMetric {
+		metric = nil
+	}
+	out, q.event.Reason = q.control.engine.recallTextMetric(ctx, original, baseline, metric)
 	q.recordRepeated(trace, q.event.Reason == "fragment_selected" && q.event.Mode == "apply")
 	if q.event.Reason != "fragment_selected" || q.event.Mode != "apply" {
+		metric.finishFinal("", true)
+		q.event.setMetric(metric)
 		return "", false
 	}
+	metric.finishFinal(out, false)
+	q.event.setMetric(metric)
 	q.event.Applied = true
 	return out, true
 }
@@ -339,6 +347,17 @@ func contextRecallReplaceContent(item any, content any) any {
 }
 
 func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline string) (string, string) {
+	return r.recallTextMetric(ctx, original, baseline, nil)
+}
+
+func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, baseline string, metric *contextRecallMetric) (string, string) {
+	var (
+		source, old            []rune
+		headKeep, preTailStart int
+		question               map[string]int
+		chunks                 []contextFragment
+		df                     map[string]int
+	)
 	if len(original) > r.maxBytes {
 		return "", "fragment_size_limit"
 	}
@@ -356,7 +375,11 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	source, old := []rune(original), []rune(baseline)
+	// Registered after cancel so the metric still sees a live context.
+	defer func() {
+		r.fillTextMetric(ctx, metric, source, old, headKeep, preTailStart, question, chunks, df)
+	}()
+	source, old = []rune(original), []rune(baseline)
 	if len(old) < 16384 {
 		return "", "fragment_small_budget"
 	}
@@ -390,7 +413,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	// The retrieval question is only the final paragraph of the message, never
 	// the document body the host happened to keep around it.
 	questionStart := contextRecallQuestionStart(source)
-	headKeep := 8192
+	headKeep = 8192
 	if questionStart <= headKeep {
 		return "", "fragment_not_needed"
 	}
@@ -398,7 +421,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	// mandatory: for pasted logs and reports the answer sits at the document
 	// end, not inside the question wording. Its size follows the baseline
 	// tail, capped at one eighth of the budget so fragments keep the rest.
-	preTailStart := questionStart
+	preTailStart = questionStart
 	if tailStart < questionStart {
 		limit := budget / 4 // estimate units: ascii 1 / non-ascii 2
 		units := 0

@@ -33,6 +33,17 @@ type contextRecallTurn struct {
 }
 
 func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any, protocol string, rawBytes, budget int, baseline ...[]any) ([]any, string) {
+	return r.chooseMetric(ctx, payload, protocol, rawBytes, budget, nil, baseline...)
+}
+
+func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[string]any, protocol string, rawBytes, budget int, metric *contextRecallMetric, baseline ...[]any) (kept []any, reason string) {
+	var (
+		items         []any
+		turns         []contextRecallTurn
+		query, df     map[string]int
+		questionSpan  string
+		baselineItems []any
+	)
 	if rawBytes > r.maxBytes {
 		return nil, "size_limit"
 	}
@@ -47,6 +58,10 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
+	// Registered after cancel so the metric still sees a live context.
+	defer func() {
+		r.fillItemsMetric(ctx, metric, items, turns, query, df, questionSpan, baselineItems)
+	}()
 	field := contextRecallField(protocol)
 	items, ok := payload[field].([]any)
 	if !ok || len(items) == 0 {
@@ -83,6 +98,7 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	if len(baseline) != 1 {
 		return nil, "baseline_missing"
 	}
+	baselineItems = baseline[0]
 	baselineMask := make([]bool, len(items))
 	baselineAt := 0
 	for i, item := range items {
@@ -109,7 +125,7 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	}
 	// The retrieval question is only the final paragraph of the latest user
 	// message. Earlier user turns still contribute their statement edges.
-	query := make(map[string]int)
+	query = make(map[string]int)
 	userTurns := 0
 	queryTurnLimit := 1
 	for i := len(items) - 1; i >= 0 && userTurns < queryTurnLimit; i-- {
@@ -121,6 +137,7 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		text := full
 		if userTurns == 1 {
 			question := contextRecallQuestionText(full)
+			questionSpan = question
 			if contextRecallBroadQuery(question) {
 				return nil, "broad_query"
 			}
@@ -381,7 +398,7 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		queryTerms = append(queryTerms, term)
 	}
 	sort.Strings(queryTerms)
-	df := make(map[string]int)
+	df = make(map[string]int)
 	totalLength := 0
 	for i := range turns {
 		if ctx.Err() != nil {
@@ -609,7 +626,7 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 			return nil, reason
 		}
 	}
-	kept := []any{}
+	kept = []any{}
 	for i, item := range items {
 		if !selected[i] {
 			continue
