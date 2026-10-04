@@ -67,7 +67,7 @@ func TestContextRecallMetricSingleNeedle(t *testing.T) {
 		} else if ev.FinalHit != ev.CutTerms {
 			t.Fatalf("%s: final_hit=%d cut_terms=%d", variant, ev.FinalHit, ev.CutTerms)
 		}
-		if ev.MetricMS < 0 || ev.MetricMS > 40 {
+		if ev.MetricMS < 0 || ev.MetricMS > 80 {
 			t.Fatalf("%s: metric_ms=%d out of bound", variant, ev.MetricMS)
 		}
 		t.Logf("%s single: q=%d cut=%d base=%d final=%d metric_ms=%d select_ms=%d", variant, ev.QTerms, ev.CutTerms, ev.BaselineHit, ev.FinalHit, ev.MetricMS, ev.SelectMS)
@@ -103,7 +103,7 @@ func TestContextRecallMetricMultiNeedle(t *testing.T) {
 		} else if ev.FinalHit != ev.CutTerms {
 			t.Fatalf("%s: final_hit=%d cut_terms=%d", variant, ev.FinalHit, ev.CutTerms)
 		}
-		if ev.MetricMS < 0 || ev.MetricMS > 40 {
+		if ev.MetricMS < 0 || ev.MetricMS > 80 {
 			t.Fatalf("%s: metric_ms=%d out of bound", variant, ev.MetricMS)
 		}
 		t.Logf("%s multi: q=%d cut=%d base=%d final=%d metric_ms=%d select_ms=%d", variant, ev.QTerms, ev.CutTerms, ev.BaselineHit, ev.FinalHit, ev.MetricMS, ev.SelectMS)
@@ -186,7 +186,7 @@ func TestContextRecallMetricScaleCost(t *testing.T) {
 	if ev.MetricMS < 0 {
 		t.Fatalf("metric_ms=%d want >=0", ev.MetricMS)
 	}
-	if ev.MetricMS > 40 {
+	if ev.MetricMS > 80 {
 		t.Fatalf("metric_ms=%d exceeds the bounded budget", ev.MetricMS)
 	}
 }

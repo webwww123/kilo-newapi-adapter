@@ -136,11 +136,11 @@ func (q *contextRecallRequest) selectText(original, baseline string) (out string
 	out, q.event.Reason = q.control.engine.recallTextMetric(ctx, original, baseline, metric)
 	q.recordRepeated(trace, q.event.Reason == "fragment_selected" && q.event.Mode == "apply")
 	if q.event.Reason != "fragment_selected" || q.event.Mode != "apply" {
-		metric.finishFinal("", true)
+		metric.finishFinal(true)
 		q.event.setMetric(metric)
 		return "", false
 	}
-	metric.finishFinal(out, false)
+	metric.finishFinal(false)
 	q.event.setMetric(metric)
 	q.event.Applied = true
 	return out, true
@@ -354,8 +354,9 @@ func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, ba
 	var (
 		source, old            []rune
 		headKeep, preTailStart int
+		split, tailStart       int
 		question               map[string]int
-		chunks                 []contextFragment
+		chunks, picked         []contextFragment
 		df                     map[string]int
 	)
 	if len(original) > r.maxBytes {
@@ -377,7 +378,7 @@ func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, ba
 	defer cancel()
 	// Registered after cancel so the metric still sees a live context.
 	defer func() {
-		r.fillTextMetric(ctx, metric, source, old, headKeep, preTailStart, question, chunks, df)
+		r.fillTextMetric(ctx, metric, source, old, headKeep, split, tailStart, preTailStart, question, chunks, picked, df)
 	}()
 	source, old = []rune(original), []rune(baseline)
 	if len(old) < 16384 {
@@ -395,7 +396,7 @@ func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, ba
 	if prefix+suffix < len(old) {
 		return "", "fragment_unknown_baseline"
 	}
-	split := len(old) / 4
+	split = len(old) / 4
 	if split > prefix {
 		split = prefix
 	}
@@ -405,7 +406,7 @@ func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, ba
 	if split < 8192 || split >= len(old) {
 		return "", "fragment_protected_budget"
 	}
-	tailStart := len(source) - (len(old) - split)
+	tailStart = len(source) - (len(old) - split)
 	if tailStart <= split {
 		return "", "fragment_not_needed"
 	}
@@ -502,7 +503,7 @@ func (r *contextRecallEngine) recallTextMetric(ctx context.Context, original, ba
 	if allowance <= 0 {
 		return "", "fragment_budget"
 	}
-	picked := r.pickSourceChunks(source, chunks, allowance, 256)
+	picked = r.pickSourceChunks(source, chunks, allowance, 256)
 	for _, hit := range lineFallbackRequired {
 		covered := false
 		for _, chunk := range picked {

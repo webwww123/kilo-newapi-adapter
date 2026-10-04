@@ -238,17 +238,17 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 	kept, q.event.Reason = q.control.engine.chooseMetric(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, metric, baseline...)
 	q.recordRepeated(trace, q.event.Reason == "selected" && q.event.Mode == "apply")
 	if q.event.Reason != "selected" {
-		metric.finishFinal("", true)
+		metric.finishFinal(true)
 		q.event.setMetric(metric)
 		return nil, false
 	}
 	q.event.CandidateItems = len(kept)
 	if q.event.Mode != "apply" {
-		metric.finishFinal("", true)
+		metric.finishFinal(true)
 		q.event.setMetric(metric)
 		return nil, false
 	}
-	metric.finishFinal(contextRecallJoinedText(kept), false)
+	metric.finishFinal(false)
 	q.event.setMetric(metric)
 	q.event.Applied = true
 	return kept, true

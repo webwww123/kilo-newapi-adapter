@@ -38,11 +38,13 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 
 func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[string]any, protocol string, rawBytes, budget int, metric *contextRecallMetric, baseline ...[]any) (kept []any, reason string) {
 	var (
-		items         []any
-		turns         []contextRecallTurn
-		query, df     map[string]int
-		questionSpan  string
-		baselineItems []any
+		items        []any
+		turns        []contextRecallTurn
+		query, df    map[string]int
+		questionSpan string
+		baselineMask []bool
+		selected     []bool
+		replaced     map[int]any
 	)
 	if rawBytes > r.maxBytes {
 		return nil, "size_limit"
@@ -60,7 +62,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	defer cancel()
 	// Registered after cancel so the metric still sees a live context.
 	defer func() {
-		r.fillItemsMetric(ctx, metric, items, turns, query, df, questionSpan, baselineItems)
+		r.fillItemsMetric(ctx, metric, items, turns, query, df, questionSpan, baselineMask, selected, replaced)
 	}()
 	field := contextRecallField(protocol)
 	items, ok := payload[field].([]any)
@@ -98,8 +100,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	if len(baseline) != 1 {
 		return nil, "baseline_missing"
 	}
-	baselineItems = baseline[0]
-	baselineMask := make([]bool, len(items))
+	baselineMask = make([]bool, len(items))
 	baselineAt := 0
 	for i, item := range items {
 		if baselineAt < len(baseline[0]) && reflect.DeepEqual(item, baseline[0][baselineAt]) {
@@ -110,9 +111,9 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	if baselineAt != len(baseline[0]) {
 		return nil, "baseline_invalid"
 	}
-	selected := make([]bool, len(items))
+	selected = make([]bool, len(items))
 	chosen := make([]bool, len(turns))
-	replaced := map[int]any{}
+	replaced = map[int]any{}
 	repCost := map[int]int{}
 	repBase := map[int]int{}
 	used := 0
