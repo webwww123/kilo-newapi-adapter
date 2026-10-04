@@ -96,6 +96,10 @@ func TestContextRecallMetricLargeSession(t *testing.T) {
 			items := bigSessionItems(cell.count, cell.bytes, needle, question)
 			payload := bigSessionRender(items, protocol)
 			engine := newContextRecallEngine()
+			// Selection keeps its 250ms budget in production; the test widens it
+			// so the metric assertions run on the applied path even when the race
+			// detector slows the pass several fold.
+			engine.timeout = 30 * time.Second
 			m, reason, sel := runBigMetric(t, engine, payload, protocol, cell.budget)
 			t.Logf("large %dx%dKB %s: reason=%s select_ms=%d q=%d cut=%d base=%d final=%d metric_ms=%d",
 				cell.count, cell.bytes/1024, protocol, reason, sel, m.q, m.cut, m.baseHit, m.finalHit, m.ms)
