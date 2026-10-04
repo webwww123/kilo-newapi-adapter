@@ -20,6 +20,7 @@ func fragmentFixture(needle string) string {
 
 func TestContextRecallFragmentsRecoverWithoutTouchingTail(t *testing.T) {
 	engine := newContextRecallEngine()
+	engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
 	for _, needle := range []string{"ARCHIVE_TARGET = 92af6e1b", "ARCHIVE_TARGET(path=src/payments/service.go): do not modify invoice_id; use integer cents", "ARCHIVE_TARGET：北门口令是青石；人物约定不得伤害守卫"} {
 		original := fragmentFixture(needle)
 		baseline := trimStringPreservingEdgesToContextBudget(original, 80000)
@@ -45,6 +46,7 @@ func TestContextRecallFragmentsRecoverWithoutTouchingTail(t *testing.T) {
 
 func TestContextRecallFragmentsNegativeAndFailOpen(t *testing.T) {
 	r := newContextRecallEngine()
+	r.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
 	original := fragmentFixture("no matching evidence")
 	baseline := trimStringPreservingEdgesToContextBudget(original, 80000)
 	if _, why := r.recallText(context.Background(), original, baseline); why != "fragment_no_evidence" {
@@ -80,7 +82,9 @@ func TestContextRecallFragmentsCustomerReport(t *testing.T) {
 	if strings.Contains(baseline, needle) {
 		t.Fatal("fixture no longer exercises discarded middle")
 	}
-	out, why := newContextRecallEngine().recallText(context.Background(), original, baseline)
+	engine := newContextRecallEngine()
+	engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
+	out, why := engine.recallText(context.Background(), original, baseline)
 	if why != "fragment_selected" || !strings.Contains(out, needle) {
 		t.Fatal("customer document neighborhood absent", why)
 	}
@@ -92,6 +96,7 @@ func TestContextRecallFragmentsProtocolTextBlocks(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "policy.json")
 		os.WriteFile(path, []byte(`{"mode":"apply","percent":100,"fragment_percent":100}`), 0600)
 		q := newContextRecallControl(path).begin(httptest.NewRequest("POST", "/v1/"+protocol, nil))
+		q.control.engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
 		field, blockType := "messages", "text"
 		if protocol == "responses" {
 			field, blockType = "input", "input_text"
@@ -124,6 +129,7 @@ func TestContextRecallFragmentsControlAndStructure(t *testing.T) {
 		b, _ := json.Marshal(map[string]any{"mode": "apply", "percent": 100, "fragment_percent": pct})
 		os.WriteFile(path, b, 0600)
 		control := newContextRecallControl(path)
+		control.engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
 		request := control.begin(httptest.NewRequest("POST", "/v1/chat/completions", nil))
 		out, applied := request.selectTextItems(payload, "messages", baseline)
 		if applied != (pct == 100) {

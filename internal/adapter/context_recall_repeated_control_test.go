@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func repeatedControlFixture() string {
@@ -38,6 +39,7 @@ func TestContextRecallRepeatedRolloutAndTelemetry(t *testing.T) {
 				t.Fatal(err)
 			}
 			q := newContextRecallControl(path).begin(httptest.NewRequest("POST", "/v1/"+protocol, nil))
+			q.control.engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
 			field := "messages"
 			if protocol == "responses" {
 				field = "input"

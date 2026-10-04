@@ -132,7 +132,9 @@ func TestContextRecallMessagesThinkingBlocks(t *testing.T) {
 	profile := contextTrimProfile{ContextLimit: budget + 8192 + contextTrimOverheadTokens + contextEstimateAnyTokens(payload["system"])}
 
 	var stats contextTrimStats
-	q := gapRecallRequest(newContextRecallEngine(), "messages", len(mustJSON(t, payload)), budget)
+	engine := newContextRecallEngine()
+	engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
+	q := gapRecallRequest(engine, "messages", len(mustJSON(t, payload)), budget)
 	trimMessagePayload(payload, "messages", profile, false, &stats, q)
 	if q.event.Reason != "selected" || !q.event.Applied {
 		t.Fatalf("recall did not act on a thinking history: %s", q.event.Reason)

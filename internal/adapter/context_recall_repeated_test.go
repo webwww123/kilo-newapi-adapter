@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRepeatedLineAmbiguityAndLimits(t *testing.T) {
@@ -87,7 +88,9 @@ func TestRepeatedLineFullPathPreservesExistingValue(t *testing.T) {
 	if !strings.Contains(baseline, "prefix-431") || strings.Contains(baseline, "middle-999") {
 		t.Fatal("invalid prefix protection fixture")
 	}
-	out, why := newContextRecallEngine().recallText(context.WithValue(context.Background(), contextRepeatedKey{}, true), original, baseline)
+	engine := newContextRecallEngine()
+	engine.timeout = 5 * time.Second // race instrumentation is not a latency benchmark
+	out, why := engine.recallText(context.WithValue(context.Background(), contextRepeatedKey{}, true), original, baseline)
 	if why != "fragment_selected" || !strings.Contains(out, "prefix-431") || !strings.Contains(out, "middle-999") {
 		t.Fatal("evicted an existing distinct value", why)
 	}
