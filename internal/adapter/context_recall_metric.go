@@ -77,22 +77,26 @@ func contextRecallTrimByte(c byte) bool {
 	return c == '.' || c == '_' || c == '/' || c == '-'
 }
 
-// Count occurrences of an already-lowercased term inside already-lowercased
-// text using the same token rules as contextRecallMatchingTerms: an ASCII
-// word occurrence is a token only when the surrounding word run is pure
-// trimmable ._/- edges, and a Han bigram occurrence is plain adjacency.
-func contextRecallTermCount(lowered, term string) int {
+// Report whether an already-lowercased term occurs more than limit times
+// inside already-lowercased text, stopping at limit+1 hits. The token rules
+// match contextRecallMatchingTerms: an ASCII word occurrence is a token only
+// when the surrounding word run is pure trimmable ._/- edges, and a Han
+// bigram occurrence is plain adjacency.
+func contextRecallTermExceeds(lowered, term string, limit int) bool {
 	if term == "" || lowered == "" {
-		return 0
+		return false
 	}
 	if rs := []rune(term); len(rs) == 2 && unicode.Is(unicode.Han, rs[0]) && unicode.Is(unicode.Han, rs[1]) {
 		n, at := 0, 0
 		for {
 			i := strings.Index(lowered[at:], term)
 			if i < 0 {
-				return n
+				return false
 			}
 			n++
+			if n > limit {
+				return true
+			}
 			at += i + 1
 		}
 	}
@@ -100,7 +104,7 @@ func contextRecallTermCount(lowered, term string) int {
 	for {
 		i := strings.Index(lowered[at:], term)
 		if i < 0 {
-			return n
+			return false
 		}
 		s, e := at+i, at+i+len(term)
 		j := s
@@ -113,6 +117,9 @@ func contextRecallTermCount(lowered, term string) int {
 		}
 		if (j == 0 || !contextRecallWordByte(lowered[j-1])) && (k == len(lowered) || !contextRecallWordByte(lowered[k])) {
 			n++
+			if n > limit {
+				return true
+			}
 		}
 		at = s + 1
 	}
@@ -140,7 +147,7 @@ func (m *contextRecallMetric) cutAgainstBaseline(eval []string, occ, occQ map[st
 		if occ[term] <= occQ[term] {
 			continue
 		}
-		if contextRecallTermCount(base, term) > occQ[term] {
+		if contextRecallTermExceeds(base, term, occQ[term]) {
 			continue
 		}
 		cut = append(cut, term)
@@ -149,7 +156,7 @@ func (m *contextRecallMetric) cutAgainstBaseline(eval []string, occ, occQ map[st
 	m.cutSet = cut
 	hit := 0
 	for _, term := range cut {
-		if contextRecallTermCount(base, term) > occQ[term] {
+		if contextRecallTermExceeds(base, term, occQ[term]) {
 			hit++
 		}
 	}
@@ -182,7 +189,7 @@ func (m *contextRecallMetric) finishFinal(finalText string, sameAsBaseline bool)
 		if m.late() {
 			return
 		}
-		if contextRecallTermCount(final, term) > m.occQ[term] {
+		if contextRecallTermExceeds(final, term, m.occQ[term]) {
 			hit++
 		}
 	}
