@@ -261,3 +261,51 @@ func TestContextRecallNeedleExam(t *testing.T) {
 	}
 	_ = encoded
 }
+
+// A pasted log ends with a unique error and the question shares no words with
+// it. The recall must still keep the document ending right before the
+// question, and the plain baseline keeps it too as a control.
+func TestContextRecallLogTailPreserved(t *testing.T) {
+	const want = "FATAL: shard-7 checksum mismatch at offset 99812"
+	line := "2026-10-04T03:12:11Z INFO worker-3 processed batch 4815 latency=23ms ok\n"
+	filler := strings.Repeat(line, 1000000/len(line)+1)
+	var doc strings.Builder
+	decoys := []float64{0.30, 0.42, 0.55, 0.66, 0.78}
+	di := 0
+	for pos := 0; pos+20000 <= len(filler); pos += 20000 {
+		doc.WriteString(filler[pos : pos+20000])
+		if di < len(decoys) && float64(pos+20000)/float64(len(filler)) >= decoys[di] {
+			doc.WriteString("2026-10-04T03:12:11Z NOTICE transient 报错 recovered after retry\n")
+			di++
+		}
+	}
+	doc.WriteString("2026-10-04T03:59:58Z " + want + "\n")
+	doc.WriteString(filler[:1500])
+	question := "这个报错怎么修？"
+	body := doc.String() + "\n" + question + "\n"
+	if contextEstimateStringTokens(body) < 480000 {
+		t.Fatalf("log fixture too small: %d est", contextEstimateStringTokens(body))
+	}
+	system := map[string]any{"role": "system", "content": "You are a careful assistant."}
+	items := []any{system, map[string]any{"role": "user", "content": body}}
+	for _, budget := range []int{220000, 91376} {
+		oldOut, oldText, _ := runNeedleExam(items, budget, false)
+		if !strings.Contains(oldText, want) {
+			t.Fatalf("budget=%d baseline lost the error line (control broken)", budget)
+		}
+		newOut, text, _ := runNeedleExam(items, budget, true)
+		t.Logf("budget=%d reason=%s est=%d baseline_est=%d", budget, newOut.reason, newOut.est, oldOut.est)
+		if newOut.reason != "fragment_selected" {
+			t.Fatalf("budget=%d recall did not apply: %s", budget, newOut.reason)
+		}
+		if !strings.Contains(text, want) {
+			t.Fatalf("budget=%d error line dropped despite preserved tail", budget)
+		}
+		if !strings.Contains(text, question) {
+			t.Fatalf("budget=%d question not preserved", budget)
+		}
+		if newOut.est > budget {
+			t.Fatalf("budget=%d estimate %d exceeds budget", budget, newOut.est)
+		}
+	}
+}

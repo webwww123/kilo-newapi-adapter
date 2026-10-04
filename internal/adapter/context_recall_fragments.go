@@ -386,12 +386,34 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	if tailStart <= split {
 		return "", "fragment_not_needed"
 	}
+	budget := r.fragmentCost(baseline)
 	// The retrieval question is only the final paragraph of the message, never
 	// the document body the host happened to keep around it.
 	questionStart := contextRecallQuestionStart(source)
 	headKeep := 8192
 	if questionStart <= headKeep {
 		return "", "fragment_not_needed"
+	}
+	// The document ending the baseline kept just before the question is also
+	// mandatory: for pasted logs and reports the answer sits at the document
+	// end, not inside the question wording. Its size follows the baseline
+	// tail, capped at one eighth of the budget so fragments keep the rest.
+	preTailStart := questionStart
+	if tailStart < questionStart {
+		limit := budget / 4 // estimate units: ascii 1 / non-ascii 2
+		units := 0
+		preTailStart = tailStart
+		for i := questionStart - 1; i >= tailStart; i-- {
+			if source[i] <= 127 {
+				units++
+			} else {
+				units += 2
+			}
+			if units > limit {
+				preTailStart = i + 1
+				break
+			}
+		}
 	}
 	questionText := string(source[questionStart:])
 	if contextRecallBroadQuery(questionText) {
@@ -408,7 +430,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	for term := range question {
 		query[term] = 1
 	}
-	chunks, df, failed := r.scoreSourceChunks(ctx, source, headKeep, questionStart, query)
+	chunks, df, failed := r.scoreSourceChunks(ctx, source, headKeep, preTailStart, query)
 	if failed != "" {
 		return "", "fragment_" + failed
 	}
@@ -430,7 +452,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 		for term := range headTerms {
 			query[term] = 1
 		}
-		chunks, df, failed = r.scoreSourceChunks(ctx, source, headKeep, questionStart, query)
+		chunks, df, failed = r.scoreSourceChunks(ctx, source, headKeep, preTailStart, query)
 		if failed != "" {
 			return "", "fragment_" + failed
 		}
@@ -443,15 +465,20 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 		if runes := []rune(scanQuestion); len(runes) > 512 {
 			scanQuestion = string(runes[len(runes)-512:])
 		}
-		lineFallbackRequired, lineFallbackGuard = contextRepeatedFragments(ctx, scanQuestion, source, headKeep, questionStart, df, chunks)
+		lineFallbackRequired, lineFallbackGuard = contextRepeatedFragments(ctx, scanQuestion, source, headKeep, preTailStart, df, chunks)
 		if len(lineFallbackRequired) > 0 {
 			contextRepeatedMatch(ctx)
 		}
 	}
-	budget := r.fragmentCost(baseline)
 	// When the latest message itself exceeds budget the recalled middle may use
-	// up to half of it. Every other path keeps the original one-fifth cap.
+	// up to half of it — and never more than what the mandatory edges leave.
 	allowance := budget / 2
+	if rem := budget - r.fragmentCost(contextRecallJoinText(source, headKeep, nil, preTailStart)) - 16; rem < allowance {
+		allowance = rem
+	}
+	if allowance <= 0 {
+		return "", "fragment_budget"
+	}
 	picked := r.pickSourceChunks(source, chunks, allowance, 256)
 	for _, hit := range lineFallbackRequired {
 		covered := false
@@ -479,7 +506,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	}
 	// The mandatory tail always survives; a term still present there is never
 	// being evicted and must not block recovery.
-	if terms, _, ok := contextRecallMatchingTerms(ctx, string(source[questionStart:]), question); ok {
+	if terms, _, ok := contextRecallMatchingTerms(ctx, string(source[preTailStart:]), question); ok {
 		for term := range terms {
 			keptDoc[term] = 1
 		}
@@ -491,7 +518,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	}
 	var lost [][2]int
 	lost = append(lost, contextRecallLostRanges(headKeep, split, picked)...)
-	lost = append(lost, contextRecallLostRanges(tailStart, questionStart, picked)...)
+	lost = append(lost, contextRecallLostRanges(tailStart, preTailStart, picked)...)
 	for _, span := range lost {
 		terms, _, ok := contextRecallMatchingTerms(ctx, string(source[span[0]:span[1]]), question)
 		if !ok {
@@ -506,7 +533,7 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 			return "", "fragment_protected_repeated_evidence"
 		}
 	}
-	out := contextRecallJoinText(source, headKeep, picked, questionStart)
+	out := contextRecallJoinText(source, headKeep, picked, preTailStart)
 	if ctx.Err() != nil {
 		return "", "fragment_deadline"
 	}
