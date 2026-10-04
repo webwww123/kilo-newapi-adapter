@@ -49,7 +49,7 @@ func TestRepeatedLineCannotReturnPartialFragmentSet(t *testing.T) {
 	// chunk list. Aborting must leave scores untouched, not return a partial set.
 	end := strings.Index(string(source), "FETCH_LIMIT = 901")
 	chunks := []contextFragment{{lo: 0, hi: end}}
-	got, _ := contextRepeatedFragments(context.Background(), source, 0, len(source)-len("Question: FETCH_LIMIT?\n"), map[string]int{"fetch_limit": 20}, chunks)
+	got, _ := contextRepeatedFragments(context.Background(), "Question: FETCH_LIMIT?\n", source, 0, len(source)-len("Question: FETCH_LIMIT?\n"), map[string]int{"fetch_limit": 20}, chunks)
 	if len(got) != 0 || chunks[0].score != 0 {
 		t.Fatal("partial fallback mutated original score", got, chunks)
 	}
@@ -88,7 +88,7 @@ func TestRepeatedLineFullPathPreservesExistingValue(t *testing.T) {
 		t.Fatal("invalid prefix protection fixture")
 	}
 	out, why := newContextRecallEngine().recallText(context.WithValue(context.Background(), contextRepeatedKey{}, true), original, baseline)
-	if why != "fragment_protected_repeated_evidence" || out != "" {
+	if why != "fragment_selected" || !strings.Contains(out, "prefix-431") || !strings.Contains(out, "middle-999") {
 		t.Fatal("evicted an existing distinct value", why)
 	}
 }

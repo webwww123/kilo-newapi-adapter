@@ -61,8 +61,8 @@ func TestContextRecallRepeatedRolloutAndTelemetry(t *testing.T) {
 			}
 			if row.want {
 				text := out[0].(map[string]any)["content"].(string)
-				old := []rune(baselineText)
-				if !strings.Contains(text, "FETCH_LIMIT = middle-999") || !strings.Contains(text, "CURRENT_REV_31") || !strings.HasSuffix(text, string(old[len(old)/4:])) || newContextRecallEngine().fragmentCost(text) > newContextRecallEngine().fragmentCost(baselineText) {
+				source := []rune(original)
+				if !strings.Contains(text, "FETCH_LIMIT = middle-999") || !strings.Contains(text, "CURRENT_REV_31") || !strings.HasSuffix(text, string(source[contextRecallQuestionStart(source):])) || newContextRecallEngine().fragmentCost(text) > newContextRecallEngine().fragmentCost(baselineText) {
 					t.Fatal("fallback missed evidence, recent state, or capacity protection")
 				}
 			}

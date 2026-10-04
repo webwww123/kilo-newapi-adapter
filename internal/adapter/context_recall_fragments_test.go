@@ -30,8 +30,8 @@ func TestContextRecallFragmentsRecoverWithoutTouchingTail(t *testing.T) {
 		if reason != "fragment_selected" || !strings.Contains(out, "\nNEIGHBOR_BEFORE_7f3a\n"+needle+"\nNEIGHBOR_AFTER_7f3a\n") {
 			t.Fatalf("did not recover source neighborhood: %s", reason)
 		}
-		old := []rune(baseline)
-		if !strings.HasPrefix(out, string([]rune(original)[:8192])) || !strings.HasSuffix(out, string(old[len(old)/4:])) {
+		source := []rune(original)
+		if !strings.HasPrefix(out, string(source[:8192])) || !strings.HasSuffix(out, string(source[contextRecallQuestionStart(source):])) {
 			t.Fatal("protected edges changed")
 		}
 		if engine.fragmentCost(out) > engine.fragmentCost(baseline) {
