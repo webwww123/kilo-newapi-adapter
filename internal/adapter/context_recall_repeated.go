@@ -161,13 +161,12 @@ func (s *repeatedScanner) rare() []repeatedLocation {
 	return out
 }
 
-func contextRepeatedFragments(ctx context.Context, source []rune, lo, hi int, df map[string]int, chunks []contextFragment) ([]repeatedLocation, *repeatedScanner) {
+func contextRepeatedFragments(ctx context.Context, question string, source []rune, lo, hi int, df map[string]int, chunks []contextFragment) ([]repeatedLocation, *repeatedScanner) {
 	for _, chunk := range chunks {
 		if chunk.score > 0 {
 			return nil, nil
 		}
 	}
-	question := string(source[max(0, len(source)-2048):])
 	s := newRepeatedScanner(ctx, question, df, len(chunks), true)
 	if s == nil {
 		return nil, nil

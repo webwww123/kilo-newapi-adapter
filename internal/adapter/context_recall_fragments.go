@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Only repair text the host already truncated. Never change an item role,
@@ -145,6 +146,198 @@ type contextFragment struct {
 	score  float64
 }
 
+// The question part of a text is its last paragraph, capped to about 2000
+// estimated tokens of suffix using the same edge convention as the host tail.
+func contextRecallQuestionStart(source []rune) int {
+	end := len(source)
+	for end > 0 && unicode.IsSpace(source[end-1]) {
+		end--
+	}
+	start := 0
+	for i := end - 2; i >= 0; i-- {
+		if source[i] == '\n' && source[i+1] == '\n' {
+			start = i + 2
+			break
+		}
+	}
+	units := 0
+	for i := end - 1; i >= start; i-- {
+		if source[i] <= 127 {
+			units++
+		} else {
+			units += 2
+		}
+		if units > 4000 {
+			// A capped paragraph keeps only whole trailing lines: a mid-line
+			// cut leaks document words and broken tokens into the query.
+			for j := i + 1; j < end; j++ {
+				if source[j] == '\n' {
+					return j + 1
+				}
+			}
+			return i + 1
+		}
+	}
+	return start
+}
+
+func contextRecallQuestionText(text string) string {
+	source := []rune(text)
+	return string(source[contextRecallQuestionStart(source):])
+}
+
+// Score the same overlapping windows as before against the query. Returns the
+// fragment list plus the query-term document frequency. A failure reason is
+// returned without the "fragment_" prefix for callers outside this file.
+func (r *contextRecallEngine) scoreSourceChunks(ctx context.Context, source []rune, lo, hi int, query map[string]int) ([]contextFragment, map[string]int, string) {
+	var chunks []contextFragment
+	df := map[string]int{}
+	for c := lo; c < hi; c += 768 {
+		end := min(hi, c+1024)
+		terms, _, ok := contextRecallMatchingTerms(ctx, string(source[c:end]), query)
+		if !ok || ctx.Err() != nil {
+			return nil, nil, "deadline"
+		}
+		for term := range terms {
+			df[term]++
+		}
+		chunks = append(chunks, contextFragment{lo: c, hi: end, terms: terms})
+		if len(chunks) > 16384 {
+			return nil, nil, "item_limit"
+		}
+	}
+	for i := range chunks {
+		for term, count := range chunks[i].terms {
+			// Repeated filler and common instructions must not crowd out a rare
+			// path, identifier or Chinese bigram requested at the edges.
+			if df[term] > max(2, len(chunks)/8) {
+				continue
+			}
+			chunks[i].score += math.Log(1+float64(len(chunks))/float64(df[term]+1)) * float64(min(count, 2))
+		}
+	}
+	return chunks, df, ""
+}
+
+// Pick the highest-scoring non-overlapping chunks while the accumulated
+// estimated cost stays within allowance. Picked chunks come back in source
+// order for the existing "\n\n" join format.
+func (r *contextRecallEngine) pickSourceChunks(source []rune, chunks []contextFragment, allowance, maxPicks int) []contextFragment {
+	order := make([]int, len(chunks))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return chunks[order[a]].score > chunks[order[b]].score })
+	var picked []contextFragment
+	used := 0
+	for _, i := range order {
+		chunk := chunks[i]
+		if chunk.score <= 0 || len(picked) >= maxPicks {
+			break
+		}
+		overlaps := false
+		for _, old := range picked {
+			if chunk.lo < old.hi && old.lo < chunk.hi {
+				overlaps = true
+				break
+			}
+		}
+		if overlaps {
+			continue
+		}
+		cost := r.fragmentCost(string(source[chunk.lo:chunk.hi])) + 8
+		if used+cost > allowance {
+			continue
+		}
+		picked = append(picked, chunk)
+		used += cost
+	}
+	sort.Slice(picked, func(i, j int) bool { return picked[i].lo < picked[j].lo })
+	return picked
+}
+
+func contextRecallJoinText(source []rune, head int, picked []contextFragment, tail int) string {
+	var middle strings.Builder
+	for _, chunk := range picked {
+		middle.WriteString("\n\n")
+		middle.WriteString(string(source[chunk.lo:chunk.hi]))
+	}
+	middle.WriteString("\n\n")
+	return string(source[:head]) + middle.String() + string(source[tail:])
+}
+
+// Subtract picked fragment ranges from a span. The returned sub-ranges are the
+// content a trimmed edge would actually lose.
+func contextRecallLostRanges(spanLo, spanHi int, picked []contextFragment) [][2]int {
+	var out [][2]int
+	pos := spanLo
+	for _, chunk := range picked {
+		if chunk.hi <= spanLo || chunk.lo >= spanHi {
+			continue
+		}
+		lo, hi := max(chunk.lo, spanLo), min(chunk.hi, spanHi)
+		if lo > pos {
+			out = append(out, [2]int{pos, lo})
+		}
+		if hi > pos {
+			pos = hi
+		}
+	}
+	if spanHi > pos {
+		out = append(out, [2]int{pos, spanHi})
+	}
+	return out
+}
+
+// A plain text item can shrink to its edges plus question-matching fragments.
+// Tool calls/results, media, multi-part content and non-message roles never
+// qualify; pairing and metadata stay untouched.
+type contextShrinkPlan struct {
+	index       int
+	src         []rune
+	head, tail  int
+	replace     func(string) any
+	minimal     string
+	minimalCost int
+}
+
+func (r *contextRecallEngine) planItemShrink(item any) *contextShrinkPlan {
+	m, ok := item.(map[string]any)
+	if !ok || contextItemHasToolCall(m) || len(contextAnthropicToolResultIDSet(m)) > 0 {
+		return nil
+	}
+	if role := contextItemRole(m); role != "user" && role != "assistant" {
+		return nil
+	}
+	text, replace, ok := contextFragmentContent(m["content"])
+	if !ok || text == "" {
+		return nil
+	}
+	src := []rune(text)
+	tail := contextRecallQuestionStart(src)
+	head := min(8192, tail)
+	if tail-head < 2048 {
+		return nil
+	}
+	minimal := contextRecallJoinText(src, head, nil, tail)
+	return &contextShrinkPlan{src: src, head: head, tail: tail, replace: replace, minimal: minimal, minimalCost: contextEstimateAnyTokens(replace(minimal))}
+}
+
+// Rebuild the item map with a replacement content value, keeping every other
+// key exactly as the protocol sent it.
+func contextRecallReplaceContent(item any, content any) any {
+	m, ok := item.(map[string]any)
+	if !ok {
+		return item
+	}
+	copyItem := make(map[string]any, len(m))
+	for key, value := range m {
+		copyItem[key] = value
+	}
+	copyItem["content"] = content
+	return copyItem
+}
+
 func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline string) (string, string) {
 	if len(original) > r.maxBytes {
 		return "", "fragment_size_limit"
@@ -193,79 +386,76 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 	if tailStart <= split {
 		return "", "fragment_not_needed"
 	}
-	queryText := string(source[:min(2048, split)]) + "\n" + string(source[max(tailStart, len(source)-2048):])
-	if contextRecallBroadQuery(queryText) {
+	// The retrieval question is only the final paragraph of the message, never
+	// the document body the host happened to keep around it.
+	questionStart := contextRecallQuestionStart(source)
+	headKeep := 8192
+	if questionStart <= headKeep {
+		return "", "fragment_not_needed"
+	}
+	questionText := string(source[questionStart:])
+	if contextRecallBroadQuery(questionText) {
 		return "", "fragment_broad_query"
 	}
-	query, _, ok := contextRecallTerms(ctx, queryText)
+	question, _, ok := contextRecallTerms(ctx, questionText)
 	if !ok {
 		return "", "fragment_deadline"
 	}
-	if len(query) == 0 {
+	if len(question) == 0 {
 		return "", "fragment_no_query"
 	}
-	var chunks []contextFragment
-	df := map[string]int{}
-	for lo := split; lo < tailStart; lo += 768 {
-		hi := min(tailStart, lo+1024)
-		terms, _, ok := contextRecallMatchingTerms(ctx, string(source[lo:hi]), query)
-		if !ok || ctx.Err() != nil {
-			return "", "fragment_deadline"
-		}
-		for term := range terms {
-			df[term]++
-		}
-		chunks = append(chunks, contextFragment{lo: lo, hi: hi, terms: terms})
-		if len(chunks) > 16384 {
-			return "", "fragment_item_limit"
+	query := make(map[string]int, len(question))
+	for term := range question {
+		query[term] = 1
+	}
+	chunks, df, failed := r.scoreSourceChunks(ctx, source, headKeep, questionStart, query)
+	if failed != "" {
+		return "", "fragment_" + failed
+	}
+	scored := false
+	for i := range chunks {
+		if chunks[i].score > 0 {
+			scored = true
+			break
 		}
 	}
-	for i := range chunks {
-		for term, count := range chunks[i].terms {
-			// Repeated filler and common instructions must not crowd out a rare
-			// path, identifier or Chinese bigram requested at the edges.
-			if df[term] > max(2, len(chunks)/8) {
-				continue
-			}
-			chunks[i].score += math.Log(1+float64(len(chunks))/float64(df[term]+1)) * float64(min(count, 2))
+	if !scored {
+		// A task statement lives in the opening paragraph of some documents.
+		// Only when the question finds nothing do those opening terms score;
+		// document text elsewhere never reaches the query.
+		headTerms, _, ok := contextRecallTerms(ctx, string(source[:min(2048, headKeep)]))
+		if !ok {
+			return "", "fragment_deadline"
+		}
+		for term := range headTerms {
+			query[term] = 1
+		}
+		chunks, df, failed = r.scoreSourceChunks(ctx, source, headKeep, questionStart, query)
+		if failed != "" {
+			return "", "fragment_" + failed
 		}
 	}
 	var lineFallbackRequired []repeatedLocation
 	var lineFallbackGuard *repeatedScanner
 	if contextRepeatedEnabled(ctx) {
 		contextRepeatedAttempt(ctx)
-		lineFallbackRequired, lineFallbackGuard = contextRepeatedFragments(ctx, source, split, tailStart, df, chunks)
+		scanQuestion := questionText
+		if runes := []rune(scanQuestion); len(runes) > 512 {
+			scanQuestion = string(runes[len(runes)-512:])
+		}
+		lineFallbackRequired, lineFallbackGuard = contextRepeatedFragments(ctx, scanQuestion, source, headKeep, questionStart, df, chunks)
 		if len(lineFallbackRequired) > 0 {
 			contextRepeatedMatch(ctx)
 		}
 	}
-	sort.SliceStable(chunks, func(i, j int) bool { return chunks[i].score > chunks[j].score })
 	budget := r.fragmentCost(baseline)
-	allowance := budget / 5
-	var selected []contextFragment
-	used := 0
-	for _, chunk := range chunks {
-		if chunk.score <= 0 || len(selected) >= 8 {
-			break
-		}
-		overlaps := false
-		for _, old := range selected {
-			overlaps = overlaps || chunk.lo < old.hi && old.lo < chunk.hi
-		}
-		if overlaps {
-			continue
-		}
-		cost := r.fragmentCost(string(source[chunk.lo:chunk.hi])) + 8
-		if used+cost > allowance {
-			continue
-		}
-		selected = append(selected, chunk)
-		used += cost
-	}
-
+	// When the latest message itself exceeds budget the recalled middle may use
+	// up to half of it. Every other path keeps the original one-fifth cap.
+	allowance := budget / 2
+	picked := r.pickSourceChunks(source, chunks, allowance, 256)
 	for _, hit := range lineFallbackRequired {
 		covered := false
-		for _, chunk := range selected {
+		for _, chunk := range picked {
 			if chunk.lo <= hit.lo && chunk.hi >= hit.hi {
 				covered = true
 			}
@@ -274,57 +464,53 @@ func (r *contextRecallEngine) recallText(ctx context.Context, original, baseline
 			return "", "fragment_repeated_query_budget"
 		}
 	}
-	if len(selected) == 0 {
+	if len(picked) == 0 {
 		return "", "fragment_no_evidence"
 	}
-	sort.Slice(selected, func(i, j int) bool { return selected[i].lo < selected[j].lo })
-	var middle strings.Builder
-	for _, chunk := range selected {
-		middle.WriteString("\n\n")
-		middle.WriteString(string(source[chunk.lo:chunk.hi]))
+	// The mandatory edges are the opening 8192 runes and the complete question
+	// part. Everything else the host kept may still be dropped, but never the
+	// last copy of a rare question term: occurrences preserved in the kept head
+	// or in a picked fragment are not being evicted at all.
+	keptDoc := map[string]int{}
+	if terms, _, ok := contextRecallMatchingTerms(ctx, string(source[:headKeep]), question); ok {
+		for term := range terms {
+			keptDoc[term] = 1
+		}
 	}
-	middle.WriteString("\n\n")
-	if r.fragmentCost(middle.String()) > allowance {
-		return "", "fragment_share_limit"
+	// The mandatory tail always survives; a term still present there is never
+	// being evicted and must not block recovery.
+	if terms, _, ok := contextRecallMatchingTerms(ctx, string(source[questionStart:]), question); ok {
+		for term := range terms {
+			keptDoc[term] = 1
+		}
 	}
-	tail := string(source[tailStart:])
-	compose := func(n int) string { return string(source[:n]) + middle.String() + tail }
-	// The complete pre-existing tail and first 8192 runes are mandatory.
-	// Borrow only from the end of the old prefix, at most one fifth of budget.
-	lo, hi := 8192, split
-	if r.fragmentCost(compose(lo)) > budget {
-		return "", "fragment_protected_budget"
+	for _, chunk := range picked {
+		for term := range chunk.terms {
+			keptDoc[term] = 1
+		}
 	}
-	for lo < hi {
-		if ctx.Err() != nil {
+	var lost [][2]int
+	lost = append(lost, contextRecallLostRanges(headKeep, split, picked)...)
+	lost = append(lost, contextRecallLostRanges(tailStart, questionStart, picked)...)
+	for _, span := range lost {
+		terms, _, ok := contextRecallMatchingTerms(ctx, string(source[span[0]:span[1]]), question)
+		if !ok {
 			return "", "fragment_deadline"
 		}
-		mid := (lo + hi + 1) / 2
-		if r.fragmentCost(compose(mid)) <= budget {
-			lo = mid
-		} else {
-			hi = mid - 1
+		for term := range terms {
+			if keptDoc[term] == 0 && df[term] <= max(2, len(chunks)/8) {
+				return "", "fragment_protected_evidence"
+			}
+		}
+		if lineFallbackGuard != nil && !lineFallbackGuard.allowPrefixLoss(source, span[0], span[1]) {
+			return "", "fragment_protected_repeated_evidence"
 		}
 	}
-
-	if lineFallbackGuard != nil && !lineFallbackGuard.allowPrefixLoss(source, lo, split) {
-		return "", "fragment_protected_repeated_evidence"
-	}
-	out := compose(lo)
+	out := contextRecallJoinText(source, headKeep, picked, questionStart)
 	if ctx.Err() != nil {
 		return "", "fragment_deadline"
 	}
-	// Do not evict existing evidence for the same query to add older evidence.
-	lost, _, ok := contextRecallMatchingTerms(ctx, string(source[lo:split]), query)
-	if !ok {
-		return "", "fragment_deadline"
-	}
-	for term := range lost {
-		if df[term] <= max(2, len(chunks)/8) {
-			return "", "fragment_protected_evidence"
-		}
-	}
-	if r.fragmentCost(out) > budget || r.fragmentCost(string(source[lo:split])) > allowance+16 {
+	if r.fragmentCost(out) > budget || r.fragmentCost(contextRecallJoinText(source, 0, picked, len(source))) > allowance+16 {
 		return "", "fragment_budget"
 	}
 	return out, "fragment_selected"

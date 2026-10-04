@@ -96,14 +96,56 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	}
 	selected := make([]bool, len(items))
 	chosen := make([]bool, len(turns))
+	replaced := map[int]any{}
+	repCost := map[int]int{}
+	repBase := map[int]int{}
 	used := 0
 	for _, i := range anchors {
+		if contextRecallOrdinaryUser(items[i]) {
+			continue
+		}
 		selected[i] = true
 		used += costs[i]
 	}
-	// Fixed instructions and task statements are not discretionary history.
-	// Older evidence may use at most one fifth of the remaining capacity.
-	oldAllowance := (budget - used) / 5
+	// The retrieval question is only the final paragraph of the latest user
+	// message. Earlier user turns still contribute their statement edges.
+	query := make(map[string]int)
+	userTurns := 0
+	queryTurnLimit := 1
+	for i := len(items) - 1; i >= 0 && userTurns < queryTurnLimit; i-- {
+		if !contextRecallOrdinaryUser(items[i]) {
+			continue
+		}
+		userTurns++
+		full := contextRecallText(items[i])
+		text := full
+		if userTurns == 1 {
+			question := contextRecallQuestionText(full)
+			if contextRecallBroadQuery(question) {
+				return nil, "broad_query"
+			}
+			lower := strings.ToLower(strings.TrimSpace(question))
+			if strings.HasPrefix(lower, "继续") || strings.HasPrefix(lower, "continue") || strings.HasPrefix(lower, "go on") || strings.HasPrefix(lower, "proceed") {
+				queryTurnLimit = 6
+			}
+			text = question
+			if runes := []rune(full); len(runes) > 2048 {
+				text += "\n" + string(runes[:2048])
+			}
+		} else if len(text) > 8192 {
+			text = text[:4096] + " " + text[len(text)-4096:]
+		}
+		terms, _, ok := contextRecallTerms(ctx, text)
+		if !ok {
+			return nil, "deadline"
+		}
+		for term := range terms {
+			query[term] = 1
+		}
+	}
+	if len(query) == 0 {
+		return nil, "no_query_terms"
+	}
 	add := func(i, limit int) bool {
 		additional := 0
 		for _, index := range turns[i].indexes {
@@ -121,20 +163,196 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		used += additional
 		return true
 	}
-	// Protect the last ten source items, expanded to complete atomic units and
-	// their owning task. Never split a recent tool call/result to recall history.
-	for i := len(turns) - 1; i >= 0; i-- {
-		required := i >= len(turns)-2
-		for _, index := range turns[i].indexes {
-			required = required || index >= len(items)-10
+	// Protect the last ten source items expanded to complete atomic units, the
+	// final recall turns, and the anchor task statements. A protected plain text
+	// message too large to keep whole shrinks to its edges plus the fragments
+	// most relevant to the question; tool units are never split or shrunk.
+	required := make([]bool, len(turns))
+	for i := len(turns) - 1; i >= 0 && i >= len(turns)-2; i-- {
+		required[i] = true
+	}
+	for i, turn := range turns {
+		for _, index := range turn.indexes {
+			if index >= len(items)-10 {
+				required[i] = true
+			}
 		}
-		if required && !add(i, budget) {
+	}
+	requiredIdx := map[int]bool{}
+	for i, turn := range turns {
+		if !required[i] {
+			continue
+		}
+		for _, index := range turn.indexes {
+			requiredIdx[index] = true
+		}
+	}
+	for _, i := range anchors {
+		if contextRecallOrdinaryUser(items[i]) {
+			requiredIdx[i] = true
+		}
+	}
+	var protectedIdx []int
+	for index := range requiredIdx {
+		protectedIdx = append(protectedIdx, index)
+	}
+	sort.Ints(protectedIdx)
+	requiredCost := 0
+	for _, index := range protectedIdx {
+		if !selected[index] {
+			requiredCost += costs[index]
+		}
+	}
+	keepWhole := func() bool {
+		for i := range turns {
+			if required[i] && !add(i, budget) {
+				return false
+			}
+		}
+		for _, index := range protectedIdx {
+			if selected[index] {
+				continue
+			}
+			selected[index] = true
+			used += costs[index]
+		}
+		return used <= budget
+	}
+	if used+requiredCost <= budget {
+		if !keepWhole() {
 			return nil, "mandatory_turn_too_large"
+		}
+	} else {
+		plans := map[int]*contextShrinkPlan{}
+		minRequired := used
+		for _, index := range protectedIdx {
+			if selected[index] {
+				continue
+			}
+			if plan := r.planItemShrink(items[index]); plan != nil && plan.minimalCost+4 < costs[index] {
+				plan.index = index
+				plans[index] = plan
+				minRequired += plan.minimalCost + 4
+			} else {
+				minRequired += costs[index]
+			}
+		}
+		if minRequired > budget {
+			return nil, "mandatory_turn_too_large"
+		}
+		// Whole protection stays free of the old-evidence share up to the same
+		// four fifths it could cost in the minimal layout.
+		allowanceCap := budget - (budget-minRequired)/5
+		if used+requiredCost <= allowanceCap {
+			if !keepWhole() {
+				return nil, "mandatory_turn_too_large"
+			}
+		} else {
+			for _, index := range protectedIdx {
+				if selected[index] {
+					continue
+				}
+				if plan := plans[index]; plan != nil {
+					replaced[index] = contextRecallReplaceContent(items[index], plan.replace(plan.minimal))
+					repCost[index] = plan.minimalCost + 4
+					repBase[index] = plan.minimalCost + 4
+					used += repCost[index]
+				} else {
+					used += costs[index]
+				}
+				selected[index] = true
+			}
+			for i := range turns {
+				if required[i] {
+					chosen[i] = true
+				}
+			}
+			if used > budget {
+				return nil, "mandatory_turn_too_large"
+			}
+			// Grow shrunk messages with their most question-relevant fragments,
+			// ranked across all of them, while preserving the evidence share.
+			if slack := budget - used; slack > 0 && len(plans) > 0 {
+				pool := slack - slack/5
+				var order []int
+				for index := range plans {
+					order = append(order, index)
+				}
+				sort.Ints(order)
+				type candidate struct {
+					plan  *contextShrinkPlan
+					chunk contextFragment
+				}
+				var all []candidate
+				pickedBy := map[int][]contextFragment{}
+				for _, index := range order {
+					plan := plans[index]
+					chunks, _, failed := r.scoreSourceChunks(ctx, plan.src, plan.head, plan.tail, query)
+					if failed != "" {
+						return nil, "deadline"
+					}
+					for _, chunk := range chunks {
+						if chunk.score > 0 {
+							all = append(all, candidate{plan, chunk})
+						}
+					}
+				}
+				sort.SliceStable(all, func(a, b int) bool { return all[a].chunk.score > all[b].chunk.score })
+				for _, entry := range all {
+					if pool <= 0 {
+						break
+					}
+					overlaps := false
+					for _, old := range pickedBy[entry.plan.index] {
+						if entry.chunk.lo < old.hi && old.lo < entry.chunk.hi {
+							overlaps = true
+							break
+						}
+					}
+					if overlaps {
+						continue
+					}
+					cost := r.fragmentCost(string(entry.plan.src[entry.chunk.lo:entry.chunk.hi])) + 8
+					if cost > pool {
+						continue
+					}
+					pickedBy[entry.plan.index] = append(pickedBy[entry.plan.index], entry.chunk)
+					pool -= cost
+				}
+				for _, index := range order {
+					picked := pickedBy[index]
+					if len(picked) == 0 {
+						continue
+					}
+					plan := plans[index]
+					sort.Slice(picked, func(i, j int) bool { return picked[i].lo < picked[j].lo })
+					text := contextRecallJoinText(plan.src, plan.head, picked, plan.tail)
+					item := contextRecallReplaceContent(items[index], plan.replace(text))
+					cost := contextEstimateAnyTokens(item) + 4
+					used += cost - repCost[index]
+					repCost[index] = cost
+					replaced[index] = item
+				}
+			}
 		}
 	}
 	if used > budget {
 		return nil, "mandatory_turn_too_large"
 	}
+	// Fixed instructions and task statements are not discretionary history.
+	// Older evidence may use at most one fifth of the remaining capacity. A
+	// shrunk anchor frees the same share its original cost would have kept.
+	anchorCharge := 0
+	for _, i := range anchors {
+		if c, ok := repBase[i]; ok {
+			anchorCharge += c
+		} else if c, ok := repCost[i]; ok {
+			anchorCharge += c
+		} else {
+			anchorCharge += costs[i]
+		}
+	}
+	oldAllowance := (budget - anchorCharge) / 5
 	recentLimit := budget - oldAllowance
 	if used > recentLimit {
 		recentLimit = used
@@ -157,38 +375,6 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		if !add(i, recentLimit) {
 			break
 		}
-	}
-	query := make(map[string]int)
-	userTurns := 0
-	queryTurnLimit := 1
-	for i := len(items) - 1; i >= 0 && userTurns < queryTurnLimit; i-- {
-		if !contextRecallOrdinaryUser(items[i]) {
-			continue
-		}
-		userTurns++
-		text := contextRecallText(items[i])
-		if userTurns == 1 {
-			if contextRecallBroadQuery(text) {
-				return nil, "broad_query"
-			}
-			lower := strings.ToLower(strings.TrimSpace(text))
-			if strings.HasPrefix(lower, "继续") || strings.HasPrefix(lower, "continue") || strings.HasPrefix(lower, "go on") || strings.HasPrefix(lower, "proceed") {
-				queryTurnLimit = 6
-			}
-		}
-		if len(text) > 8192 {
-			text = text[:4096] + " " + text[len(text)-4096:]
-		}
-		terms, _, ok := contextRecallTerms(ctx, text)
-		if !ok {
-			return nil, "deadline"
-		}
-		for term := range terms {
-			query[term] = 1
-		}
-	}
-	if len(query) == 0 {
-		return nil, "no_query_terms"
 	}
 	queryTerms := make([]string, 0, len(query))
 	for term := range query {
@@ -280,21 +466,120 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 		cutoff = 0
 	}
 	oldAdded := 0
+	// Required task statements and complete recent tool units can already have
+	// brought back older items absent from the baseline. Charge them before
+	// choosing optional evidence, so a fitting smaller unit can still win.
+	// Mandatory members charge at their protected floor; fragments grown inside
+	// them came from the slack pool and are not discretionary old evidence.
+	charge := func(index int) int {
+		if c, ok := repBase[index]; ok {
+			return c
+		}
+		if c, ok := repCost[index]; ok {
+			return c
+		}
+		return costs[index]
+	}
+	for index, kept := range selected {
+		if kept && !baselineMask[index] && index < cutoff {
+			oldAdded += charge(index)
+		}
+	}
+	if oldAdded > oldAllowance {
+		return nil, "old_share_limit"
+	}
 	recalled := false
 	for _, i := range ranked {
 		addition := 0
 		for _, index := range turns[i].indexes {
 			if !selected[index] && !baselineMask[index] && index < cutoff {
-				addition += costs[index]
+				addition += charge(index)
 			}
 		}
-		if addition == 0 || oldAdded+addition > oldAllowance {
+		if addition == 0 {
 			continue
 		}
-		if add(i, budget) {
+		if oldAdded+addition <= oldAllowance && add(i, budget) {
 			oldAdded += addition
 			recalled = true
+			continue
 		}
+		// A scored old message too large for the evidence share can still come
+		// back as its edges plus question-matching fragments. Units without a
+		// shrinkable plain text member, or whose shrink saves nothing, are left
+		// out exactly as before.
+		var members []int
+		plans := map[int]*contextShrinkPlan{}
+		for _, index := range turns[i].indexes {
+			if selected[index] {
+				continue
+			}
+			members = append(members, index)
+			if baselineMask[index] || index >= cutoff {
+				continue
+			}
+			if plan := r.planItemShrink(items[index]); plan != nil && plan.minimalCost+4 < costs[index] {
+				plan.index = index
+				plans[index] = plan
+			}
+		}
+		if len(plans) == 0 {
+			continue
+		}
+		usedDelta, oldDelta := 0, 0
+		for _, index := range members {
+			cost := costs[index]
+			if plan := plans[index]; plan != nil {
+				cost = plan.minimalCost + 4
+			}
+			usedDelta += cost
+			if !baselineMask[index] && index < cutoff {
+				oldDelta += cost
+			}
+		}
+		if oldDelta >= addition || oldAdded+oldDelta > oldAllowance || used+usedDelta > budget {
+			continue
+		}
+		room := oldAllowance - oldAdded - oldDelta
+		if extra := budget - used - usedDelta; extra < room {
+			room = extra
+		}
+		for _, index := range members {
+			plan := plans[index]
+			if plan == nil {
+				continue
+			}
+			if ctx.Err() != nil {
+				return nil, "deadline"
+			}
+			chunks, _, failed := r.scoreSourceChunks(ctx, plan.src, plan.head, plan.tail, query)
+			if failed != "" {
+				return nil, "deadline"
+			}
+			picked := r.pickSourceChunks(plan.src, chunks, room, 8)
+			text, cost := plan.minimal, plan.minimalCost+4
+			if len(picked) > 0 {
+				grown := contextRecallJoinText(plan.src, plan.head, picked, plan.tail)
+				if grownCost := contextEstimateAnyTokens(plan.replace(grown)) + 4; grownCost-(plan.minimalCost+4) <= room {
+					text, cost = grown, grownCost
+				}
+			}
+			extra := cost - (plan.minimalCost + 4)
+			room -= extra
+			usedDelta += extra
+			if !baselineMask[index] && index < cutoff {
+				oldDelta += extra
+			}
+			replaced[index] = contextRecallReplaceContent(items[index], plan.replace(text))
+			repCost[index] = cost
+		}
+		for _, index := range members {
+			selected[index] = true
+		}
+		chosen[i] = true
+		used += usedDelta
+		oldAdded += oldDelta
+		recalled = true
 	}
 
 	for _, i := range lineFallbackRequired {
@@ -302,7 +587,10 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 			return nil, "repeated_query_budget"
 		}
 	}
-	if !recalled {
+	// A required message repaired by shrinking is new content over the legacy
+	// baseline even when no separate old unit was brought back.
+	repaired := len(replaced) > 0
+	if !recalled && !repaired {
 		return nil, "no_older_evidence"
 	}
 
@@ -323,7 +611,12 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 	}
 	kept := []any{}
 	for i, item := range items {
-		if selected[i] {
+		if !selected[i] {
+			continue
+		}
+		if grown, ok := replaced[i]; ok {
+			kept = append(kept, grown)
+		} else {
 			kept = append(kept, item)
 		}
 	}
@@ -336,10 +629,10 @@ func (r *contextRecallEngine) choose(ctx context.Context, payload map[string]any
 			return nil, "recent_guard_lost"
 		}
 		if selected[i] && !baselineMask[i] && i < cutoff {
-			actualOldAdded += costs[i]
+			actualOldAdded += charge(i)
 		}
 	}
-	if actualOldAdded == 0 {
+	if actualOldAdded == 0 && len(replaced) == 0 {
 		return nil, "no_older_evidence"
 	}
 	if actualOldAdded > oldAllowance {
