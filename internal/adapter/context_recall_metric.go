@@ -25,17 +25,19 @@ const (
 )
 
 type contextRecallMetric struct {
-	q        int
-	cut      int
-	baseHit  int
-	finalHit int
-	ms       int64
-	spent    time.Duration
-	begin    time.Time
-	occQ     map[string]int
-	cutSet   []string
-	dead     bool
-	parent   context.Context
+	q         int
+	cut       int
+	baseHit   int
+	finalHit  int
+	tailKept  int
+	budgetUse int
+	ms        int64
+	spent     time.Duration
+	begin     time.Time
+	occQ      map[string]int
+	cutSet    []string
+	dead      bool
+	parent    context.Context
 
 	// Item-path state retained for the final count: which items the selector
 	// kept or replaced, and the per-item term tables of anchor and tool-owner
@@ -55,7 +57,7 @@ type contextRecallMetric struct {
 }
 
 func newContextRecallMetric() *contextRecallMetric {
-	return &contextRecallMetric{q: -1, cut: -1, baseHit: -1, finalHit: -1}
+	return &contextRecallMetric{q: -1, cut: -1, baseHit: -1, finalHit: -1, tailKept: -1, budgetUse: -1}
 }
 
 func (m *contextRecallMetric) enter() {
@@ -257,7 +259,7 @@ func (m *contextRecallMetric) cutAgainstBaseline(eval []string, occ, cutOcc, occ
 // Item-path metric: term occurrences per turn (owner text of tool turns is
 // excluded by the selector, so it is counted here together with anchor-only
 // system/developer items) minus the occurrences inside the question span.
-func (r *contextRecallEngine) fillItemsMetric(parent context.Context, m *contextRecallMetric, items []any, turns []contextRecallTurn, query, df map[string]int, questionSpan string, baselineMask, selected []bool, replaced map[int]any) {
+func (r *contextRecallEngine) fillItemsMetric(parent context.Context, m *contextRecallMetric, items []any, turns []contextRecallTurn, query, df map[string]int, questionSpan string, baselineMask, selected []bool, replaced map[int]any, repCost map[int]int, costs []int, budget int, tail50 []int, baseEst int, applied bool) {
 	if m == nil {
 		return
 	}
@@ -268,6 +270,36 @@ func (r *contextRecallEngine) fillItemsMetric(parent context.Context, m *context
 			m.fail()
 		}
 	}()
+	// Numbers-only guards: of the baseline's last fifty positions, how many
+	// the output keeps, and how much of the budget the output estimate uses.
+	// On any fallback the sent output is the baseline itself, so the tail
+	// count is whole and the estimate is the baseline estimate.
+	if len(tail50) > 0 && budget > 0 {
+		if !applied {
+			m.tailKept = len(tail50)
+			m.budgetUse = baseEst * 100 / budget
+		} else {
+			keptTail := 0
+			for _, index := range tail50 {
+				if index < len(selected) && selected[index] {
+					keptTail++
+				}
+			}
+			m.tailKept = keptTail
+			est := 0
+			for i := range items {
+				if !selected[i] {
+					continue
+				}
+				if c, ok := repCost[i]; ok {
+					est += c
+				} else {
+					est += costs[i]
+				}
+			}
+			m.budgetUse = est * 100 / budget
+		}
+	}
 	if len(query) == 0 || len(turns) == 0 || df == nil || len(baselineMask) == 0 || questionSpan == "" {
 		return
 	}

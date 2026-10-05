@@ -86,6 +86,8 @@ type contextRecallEvent struct {
 	CutTerms                int    `json:"cut_terms"`
 	BaselineHit             int    `json:"baseline_hit"`
 	FinalHit                int    `json:"final_hit"`
+	BaselineTailKept        int    `json:"baseline_tail_kept"`
+	BudgetUsePct            int    `json:"budget_use_pct"`
 	MetricMS                int64  `json:"metric_ms"`
 }
 
@@ -94,6 +96,7 @@ func (e *contextRecallEvent) setMetric(m *contextRecallMetric) {
 		return
 	}
 	e.QTerms, e.CutTerms, e.BaselineHit, e.FinalHit, e.MetricMS = m.q, m.cut, m.baseHit, m.finalHit, m.ms
+	e.BaselineTailKept, e.BudgetUsePct = m.tailKept, m.budgetUse
 }
 
 type contextRecallRequestKey struct{}
@@ -176,8 +179,8 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
 		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
 		repeatedChosen: p.RepeatedPercent > 0 && rand.Intn(100) < p.RepeatedPercent,
-		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent,
-			QTerms: -1, CutTerms: -1, BaselineHit: -1, FinalHit: -1, MetricMS: -1}}
+		event: contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent,
+			QTerms: -1, CutTerms: -1, BaselineHit: -1, FinalHit: -1, BaselineTailKept: -1, BudgetUsePct: -1, MetricMS: -1}}
 	q.stepToolsMode = p.StepToolsMode
 	q.stepToolsPercent = p.StepToolsPercent
 	q.stepToolsChosen = p.StepToolsPercent > 0 && rand.Intn(100) < p.StepToolsPercent

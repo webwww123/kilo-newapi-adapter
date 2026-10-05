@@ -45,6 +45,10 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 		baselineMask []bool
 		selected     []bool
 		replaced     map[int]any
+		costs        []int
+		repCost      map[int]int
+		tail50       []int
+		baseEst      int
 	)
 	if rawBytes > r.maxBytes {
 		return nil, "size_limit"
@@ -62,7 +66,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	defer cancel()
 	// Registered after cancel so the metric still sees a live context.
 	defer func() {
-		r.fillItemsMetric(ctx, metric, items, turns, query, df, questionSpan, baselineMask, selected, replaced)
+		r.fillItemsMetric(ctx, metric, items, turns, query, df, questionSpan, baselineMask, selected, replaced, repCost, costs, budget, tail50, baseEst, kept != nil)
 	}()
 	field := contextRecallField(protocol)
 	items, ok := payload[field].([]any)
@@ -81,7 +85,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	if budget < 512 {
 		return nil, "fixed_fields_overflow"
 	}
-	costs := make([]int, len(items))
+	costs = make([]int, len(items))
 	totalCost := 0
 	for i, item := range items {
 		if ctx.Err() != nil {
@@ -111,10 +115,22 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	if baselineAt != len(baseline[0]) {
 		return nil, "baseline_invalid"
 	}
+	// Numbers only: the last fifty baseline positions and the baseline
+	// estimate feed the tail-keep and budget-use event metrics.
+	for i, kept := range baselineMask {
+		if !kept {
+			continue
+		}
+		baseEst += costs[i]
+		tail50 = append(tail50, i)
+	}
+	if len(tail50) > 50 {
+		tail50 = tail50[len(tail50)-50:]
+	}
 	selected = make([]bool, len(items))
 	chosen := make([]bool, len(turns))
 	replaced = map[int]any{}
-	repCost := map[int]int{}
+	repCost = map[int]int{}
 	repBase := map[int]int{}
 	used := 0
 	for _, i := range anchors {
@@ -123,6 +139,108 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 		}
 		selected[i] = true
 		used += costs[i]
+	}
+	cutoff := len(items) - 10
+	if cutoff < 0 {
+		cutoff = 0
+	}
+	charge := func(index int) int {
+		if c, ok := repBase[index]; ok {
+			return c
+		}
+		if c, ok := repCost[index]; ok {
+			return c
+		}
+		return costs[index]
+	}
+	// Completed tool groups at the legacy trim's own granularity: baseline
+	// members restore for free and their dropped siblings ride along charged
+	// as old evidence, so a call never loses its paired result.
+	groups := completedContextToolGroupsBefore(items, len(items))
+	grpOf := make(map[int]int, len(items))
+	for gi, g := range groups {
+		for _, index := range g.indexes {
+			grpOf[index] = gi
+		}
+	}
+	// The protected recent tail is the recent work the legacy trim kept: every
+	// baseline item at or after the latest ordinary user message plus the
+	// newest twenty baseline items just before it, closed over whole tool
+	// groups so no call/result pair splits. Holes the baseline itself left
+	// inside the current turn are not part of the tail — recall may mend them
+	// like any other drop — and the older contiguous baseline run before the
+	// latest user is restored by the group fill pass, newest first, so only
+	// its far edge can ever yield to scored evidence bounded by the old share.
+	latestUser := -1
+	for i := len(items) - 1; i >= 0; i-- {
+		if contextRecallOrdinaryUser(items[i]) {
+			latestUser = i
+			break
+		}
+	}
+	tailMask := make([]bool, len(items))
+	if latestUser >= 0 {
+		for i := latestUser; i < len(items); i++ {
+			if baselineMask[i] {
+				tailMask[i] = true
+			}
+		}
+	}
+	baseIdx := make([]int, 0, len(items))
+	for index, kept := range baselineMask {
+		if kept {
+			baseIdx = append(baseIdx, index)
+		}
+	}
+	for _, index := range baseIdx[max(0, len(baseIdx)-20):] {
+		tailMask[index] = true
+	}
+	for _, g := range groups {
+		inside := false
+		for _, index := range g.indexes {
+			if tailMask[index] {
+				inside = true
+				break
+			}
+		}
+		if inside {
+			for _, index := range g.indexes {
+				tailMask[index] = true
+			}
+		}
+	}
+	tailCost, hasTail := 0, false
+	for i, inTail := range tailMask {
+		if inTail {
+			tailCost += costs[i]
+			hasTail = true
+		}
+	}
+	// The current turn is everything after the latest ordinary user message,
+	// including what the baseline itself dropped inside it. When that whole
+	// turn cannot fit, keep the legacy trim verbatim instead of cutting holes
+	// inside the in-progress work.
+	if latestUser >= 0 {
+		turnAll := 0
+		for i := latestUser + 1; i < len(items); i++ {
+			turnAll += costs[i]
+		}
+		if turnAll > budget {
+			return nil, "current_turn_over_budget"
+		}
+	}
+	if tailCost > budget {
+		// Even the work the baseline kept from the current turn does not fit:
+		// keep the legacy trim verbatim instead of cutting holes inside it.
+		return nil, "current_turn_over_budget"
+	}
+	// When the protected tail is non-empty, a mandatory-set overflow means the
+	// whole current turn cannot be kept intact; report it accordingly.
+	tooLarge := func() string {
+		if hasTail {
+			return "current_turn_over_budget"
+		}
+		return "mandatory_turn_too_large"
 	}
 	// The retrieval question is only the final paragraph of the latest user
 	// message. Earlier user turns still contribute their statement edges.
@@ -210,6 +328,30 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 			requiredIdx[i] = true
 		}
 	}
+	// The protected tail is required in full: recall may only mend what the
+	// baseline dropped, never trade recent content for older evidence.
+	for index, inTail := range tailMask {
+		if inTail {
+			requiredIdx[index] = true
+		}
+	}
+	// A required member inside a completed tool group pulls in the rest of
+	// the group, so the protected span never splits a call from its result.
+	for _, g := range groups {
+		inside, outside := false, false
+		for _, index := range g.indexes {
+			if requiredIdx[index] {
+				inside = true
+			} else {
+				outside = true
+			}
+		}
+		if inside && outside {
+			for _, index := range g.indexes {
+				requiredIdx[index] = true
+			}
+		}
+	}
 	var protectedIdx []int
 	for index := range requiredIdx {
 		protectedIdx = append(protectedIdx, index)
@@ -238,15 +380,39 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	}
 	if used+requiredCost <= budget {
 		if !keepWhole() {
-			return nil, "mandatory_turn_too_large"
+			return nil, tooLarge()
 		}
 	} else {
+		// A task statement the baseline already dropped is old content, not
+		// recent work: when the mandatory set overflows it steps down to a
+		// normal candidate instead of sinking the whole selection.
+		for _, i := range anchors {
+			if requiredIdx[i] && !baselineMask[i] && !tailMask[i] {
+				requiredIdx[i] = false
+			}
+		}
+		protectedIdx = protectedIdx[:0]
+		for index := range requiredIdx {
+			if requiredIdx[index] {
+				protectedIdx = append(protectedIdx, index)
+			}
+		}
+		sort.Ints(protectedIdx)
+		requiredCost = 0
+		for _, index := range protectedIdx {
+			if !selected[index] {
+				requiredCost += costs[index]
+			}
+		}
 		plans := map[int]*contextShrinkPlan{}
 		minRequired := used
 		for _, index := range protectedIdx {
 			if selected[index] {
 				continue
 			}
+			// A protected plain text message too large to keep whole shrinks
+			// to its edges plus the fragments most relevant to the question,
+			// exactly as before; tool items are never split or shrunk.
 			if plan := r.planItemShrink(items[index]); plan != nil && plan.minimalCost+4 < costs[index] {
 				plan.index = index
 				plans[index] = plan
@@ -256,14 +422,14 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 			}
 		}
 		if minRequired > budget {
-			return nil, "mandatory_turn_too_large"
+			return nil, tooLarge()
 		}
 		// Whole protection stays free of the old-evidence share up to the same
 		// four fifths it could cost in the minimal layout.
 		allowanceCap := budget - (budget-minRequired)/5
 		if used+requiredCost <= allowanceCap {
 			if !keepWhole() {
-				return nil, "mandatory_turn_too_large"
+				return nil, tooLarge()
 			}
 		} else {
 			for _, index := range protectedIdx {
@@ -286,7 +452,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 				}
 			}
 			if used > budget {
-				return nil, "mandatory_turn_too_large"
+				return nil, tooLarge()
 			}
 			// Grow shrunk messages with their most question-relevant fragments,
 			// ranked across all of them, while preserving the evidence share.
@@ -355,13 +521,18 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 		}
 	}
 	if used > budget {
-		return nil, "mandatory_turn_too_large"
+		return nil, tooLarge()
 	}
 	// Fixed instructions and task statements are not discretionary history.
 	// Older evidence may use at most one fifth of the remaining capacity. A
 	// shrunk anchor frees the same share its original cost would have kept.
 	anchorCharge := 0
 	for _, i := range anchors {
+		// An anchor released from the mandatory set stays out of the output;
+		// only anchors actually kept may charge against the evidence share.
+		if !selected[i] {
+			continue
+		}
 		if c, ok := repBase[i]; ok {
 			anchorCharge += c
 		} else if c, ok := repCost[i]; ok {
@@ -371,27 +542,46 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 		}
 	}
 	oldAllowance := (budget - anchorCharge) / 5
-	recentLimit := budget - oldAllowance
-	if used > recentLimit {
-		recentLimit = used
-	}
-	baselineUnit := func(i int) bool {
-		if len(turns[i].indexes) == 0 {
-			return false
+	oldAdded := 0
+	for index, kept := range selected {
+		if kept && !baselineMask[index] && index < cutoff {
+			oldAdded += charge(index)
 		}
-		for _, index := range turns[i].indexes {
-			if !baselineMask[index] {
-				return false
+	}
+	// Baseline restore at the legacy trim's own granularity, newest first:
+	// baseline members ride free of the old-evidence share while their dropped
+	// group siblings are charged against it, so a call is never restored
+	// without its paired result.
+	fillBaselineGroups := func(limit int) {
+		for i := len(items) - 1; i >= 0; i-- {
+			if !baselineMask[i] || selected[i] {
+				continue
 			}
-		}
-		return true
-	}
-	for i := len(turns) - 1; i >= 0; i-- {
-		if chosen[i] || !baselineUnit(i) {
-			continue
-		}
-		if !add(i, recentLimit) {
-			break
+			if gi, ok := grpOf[i]; ok {
+				addCost, addOld := 0, 0
+				for _, index := range groups[gi].indexes {
+					if selected[index] {
+						continue
+					}
+					addCost += charge(index)
+					if !baselineMask[index] && index < cutoff {
+						addOld += charge(index)
+					}
+				}
+				if addCost == 0 || used+addCost > limit || oldAdded+addOld > oldAllowance {
+					continue
+				}
+				for _, index := range groups[gi].indexes {
+					selected[index] = true
+				}
+				used += addCost
+				oldAdded += addOld
+				continue
+			}
+			if used+costs[i] <= limit {
+				selected[i] = true
+				used += costs[i]
+			}
 		}
 	}
 	queryTerms := make([]string, 0, len(query))
@@ -479,30 +669,11 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 		}
 		return turns[i].score > turns[j].score
 	})
-	cutoff := len(items) - 10
-	if cutoff < 0 {
-		cutoff = 0
-	}
-	oldAdded := 0
 	// Required task statements and complete recent tool units can already have
 	// brought back older items absent from the baseline. Charge them before
 	// choosing optional evidence, so a fitting smaller unit can still win.
 	// Mandatory members charge at their protected floor; fragments grown inside
 	// them came from the slack pool and are not discretionary old evidence.
-	charge := func(index int) int {
-		if c, ok := repBase[index]; ok {
-			return c
-		}
-		if c, ok := repCost[index]; ok {
-			return c
-		}
-		return costs[index]
-	}
-	for index, kept := range selected {
-		if kept && !baselineMask[index] && index < cutoff {
-			oldAdded += charge(index)
-		}
-	}
 	if oldAdded > oldAllowance {
 		return nil, "old_share_limit"
 	}
@@ -515,6 +686,9 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 			}
 		}
 		if addition == 0 {
+			// A scored unit whose missing members are all baseline or recent
+			// still brings those members back; it just costs no old share.
+			add(i, budget)
 			continue
 		}
 		if oldAdded+addition <= oldAllowance && add(i, budget) {
@@ -613,12 +787,10 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	}
 
 	// Spend any remaining space on items already chosen by the legacy trim,
-	// newest first. Recall never displaces the protected recent suffix.
-	for i := len(turns) - 1; i >= 0; i-- {
-		if !chosen[i] && baselineUnit(i) {
-			add(i, budget)
-		}
-	}
+	// newest first, at completed tool group granularity so baseline members
+	// inside mixed units are restored too. Recall never displaces the
+	// protected recent tail.
+	fillBaselineGroups(budget)
 	if ctx.Err() != nil {
 		return nil, "deadline"
 	}
@@ -643,7 +815,7 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	}
 	actualOldAdded := 0
 	for i := range items {
-		if baselineMask[i] && i >= cutoff && !selected[i] {
+		if !selected[i] && (tailMask[i] || (baselineMask[i] && i >= cutoff)) {
 			return nil, "recent_guard_lost"
 		}
 		if selected[i] && !baselineMask[i] && i < cutoff {
