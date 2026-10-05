@@ -386,7 +386,7 @@ func runRecallExperiment(ctx context.Context, raw []byte, protocol string, profi
 		if os.Getenv("RECALL_PRODUCTION") == "1" {
 			engine := newContextRecallEngine()
 			engine.slots, engine.maxBytes, engine.maxItems, engine.timeout = candidate.slots, candidate.maxBytes, candidate.maxItems, candidate.timeout
-			kept, why = engine.choose(ctx, payload, protocol, len(raw), budget)
+			kept, why = engine.choose(ctx, payload, protocol, len(raw), budget, nil)
 		} else {
 			kept, why = candidate.choose(ctx, payload, protocol, len(raw), budget)
 		}

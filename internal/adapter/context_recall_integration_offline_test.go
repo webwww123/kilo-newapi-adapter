@@ -69,7 +69,7 @@ func TestContextRecallRecentAndOldShareGuard(t *testing.T) {
 	if bytes.Contains(recallJSON(t, baseline), []byte("orbit-47")) {
 		t.Fatal("fixture baseline already contains recalled fact")
 	}
-	kept, reason := newContextRecallEngine().choose(context.Background(), f.Payload, "chat", len(recallJSON(t, f.Payload)), budget, baseline)
+	kept, reason := newContextRecallEngine().choose(context.Background(), f.Payload, "chat", len(recallJSON(t, f.Payload)), budget, nil, baseline)
 	if reason != "selected" || !bytes.Contains(recallJSON(t, kept), []byte("orbit-47")) {
 		t.Fatalf("bounded old evidence was not recalled: %s", reason)
 	}

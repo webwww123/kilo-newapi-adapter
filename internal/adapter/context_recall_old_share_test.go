@@ -36,7 +36,7 @@ func TestContextRecallAccountsForProtectedOldTaskBeforeRanking(t *testing.T) {
 	}
 	before := fmt.Sprint(items)
 	engine := newContextRecallEngine()
-	candidate, reason := engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, budget, baseline)
+	candidate, reason := engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, budget, nil, baseline)
 	if reason != "selected" {
 		t.Fatalf("a smaller matching pair fits without relaxing the old-share ceiling: %s", reason)
 	}
@@ -73,7 +73,7 @@ func TestContextRecallAccountsForProtectedOldTaskBeforeRanking(t *testing.T) {
 	// A statement already present in the legacy input must not be charged a
 	// second time. The higher-ranked, larger pair is then allowed to win.
 	retained := append([]any{items[0]}, baseline...)
-	candidate, reason = engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, budget, retained)
+	candidate, reason = engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, budget, nil, retained)
 	if reason != "selected" || !contains(items[1]) || !contains(items[2]) {
 		t.Fatal("baseline task was charged as newly recalled information")
 	}
@@ -83,7 +83,7 @@ func TestContextRecallAccountsForProtectedOldTaskBeforeRanking(t *testing.T) {
 	if smallBudget < 512 || contextEstimateAnyTokens(items[0])+4 <= (smallBudget-anchors)/5 {
 		t.Fatal("small-budget fixture does not exercise the protected-old cap")
 	}
-	if candidate, reason = engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, smallBudget, baseline); candidate != nil || reason != "old_share_limit" {
+	if candidate, reason = engine.choose(context.Background(), map[string]any{"messages": items}, "chat", 50000, smallBudget, nil, baseline); candidate != nil || reason != "old_share_limit" {
 		t.Fatal("mandatory old content exceeded its unchanged share limit")
 	}
 }

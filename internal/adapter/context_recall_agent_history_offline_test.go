@@ -44,7 +44,7 @@ func TestRecallAgentHistoryAudit(t *testing.T) {
 		p := decodeRecall(t, raw)
 		baseline := decodeRecall(t, old)[recallField(protocol)].([]any)
 		engine := newContextRecallEngine()
-		kept, why := engine.choose(context.Background(), p, protocol, len(raw), 128000, baseline)
+		kept, why := engine.choose(context.Background(), p, protocol, len(raw), 128000, nil, baseline)
 		candidate := old
 		if why == "selected" {
 			p[recallField(protocol)] = kept
@@ -75,7 +75,7 @@ func TestContextRecallAgentToolPaths(t *testing.T) {
 		raw := recallJSON(t, f.Payload)
 		working, _ := cloneContextJSONValue(items).([]any)
 		baseline := selectContextItemsForBudget(working, 128000)
-		kept, why := newContextRecallEngine().choose(context.Background(), f.Payload, protocol, len(raw), 128000, baseline)
+		kept, why := newContextRecallEngine().choose(context.Background(), f.Payload, protocol, len(raw), 128000, nil, baseline)
 		if why != "selected" {
 			t.Fatalf("tool path did not trigger recall: %s %s", protocol, why)
 		}
@@ -114,7 +114,7 @@ func TestRecallAgentAnswerExport(t *testing.T) {
 		}
 		if arm == "candidate" {
 			baseline := decodeRecall(t, out)["messages"].([]any)
-			kept, reason := newContextRecallEngine().choose(context.Background(), f.Payload, "chat", len(raw), 128000, baseline)
+			kept, reason := newContextRecallEngine().choose(context.Background(), f.Payload, "chat", len(raw), 128000, nil, baseline)
 			why = reason
 			if why != "selected" {
 				t.Fatalf("agent selection failed: %s", why)

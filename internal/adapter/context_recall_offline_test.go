@@ -367,7 +367,7 @@ func TestRecallOfflineConcurrencyAndDeterminism(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, baseline)
+			out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, nil, baseline)
 			results <- result{out, why}
 		}()
 	}
@@ -400,7 +400,7 @@ func TestRecallOfflineConcurrencyAndDeterminism(t *testing.T) {
 		t.Fatal("recall slot leaked")
 	}
 	for i := 0; i < 3; i++ {
-		out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, baseline)
+		out, why := engine.choose(context.Background(), p, "chat", len(raw), 128000, nil, baseline)
 		if why != "selected" || !bytes.Equal(reference, recallJSON(t, out)) {
 			t.Fatal("repeated selection changed")
 		}

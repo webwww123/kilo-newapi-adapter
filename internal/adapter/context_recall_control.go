@@ -53,6 +53,8 @@ type contextRecallEvent struct {
 	InputItems        int    `json:"input_items"`
 	CandidateItems    int    `json:"candidate_items,omitempty"`
 	Budget            int    `json:"budget"`
+	BaselineTailKept  int    `json:"baseline_tail_kept"`
+	BudgetUsePct      int    `json:"budget_use_pct"`
 	SelectMS          int64  `json:"select_ms"`
 	Status            int    `json:"status"`
 	DurationMS        int64  `json:"duration_ms"`
@@ -126,7 +128,8 @@ func (c *contextRecallControl) begin(r *http.Request) *contextRecallRequest {
 	q := &contextRecallRequest{control: c, ctx: r.Context(), chosen: rand.Intn(100) < p.Percent,
 		fragmentChosen: rand.Intn(100) < p.FragmentPercent,
 		repeatedChosen: p.RepeatedPercent > 0 && rand.Intn(100) < p.RepeatedPercent,
-		event:          contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent}}
+		event: contextRecallEvent{Version: 1, Mode: p.Mode, Percent: p.Percent, FragmentPercent: p.FragmentPercent, RepeatedPercent: p.RepeatedPercent,
+			BaselineTailKept: -1, BudgetUsePct: -1}}
 	q.event.RepeatedEnabled = q.repeatedChosen
 	switch normalizePath(r.URL.Path) {
 	case "/messages":
@@ -177,7 +180,9 @@ func (q *contextRecallRequest) selectItems(payload map[string]any, field string,
 		}
 	}()
 	ctx, trace := q.repeatedContext()
-	kept, q.event.Reason = q.control.engine.choose(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, baseline...)
+	stat := contextRecallTailStat{TailKept: -1, BudgetUse: -1}
+	kept, q.event.Reason = q.control.engine.choose(ctx, payload, q.event.Protocol, q.event.InputBytes, budget, &stat, baseline...)
+	q.event.BaselineTailKept, q.event.BudgetUsePct = stat.TailKept, stat.BudgetUse
 	q.recordRepeated(trace, q.event.Reason == "selected" && q.event.Mode == "apply")
 	if q.event.Reason != "selected" {
 		return nil, false
