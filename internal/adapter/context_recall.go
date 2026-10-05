@@ -157,6 +157,23 @@ func (r *contextRecallEngine) chooseMetric(ctx context.Context, payload map[stri
 	// members restore for free and their dropped siblings ride along charged
 	// as old evidence, so a call never loses its paired result.
 	groups := completedContextToolGroupsBefore(items, len(items))
+	// The Anthropic baseline helper can fold the initiating user message
+	// into its tool group. That user is protected or restored on its own
+	// merits, so group membership here is limited to call/result members —
+	// a shared initiator must not link otherwise independent groups.
+	toolGroups := groups[:0]
+	for _, g := range groups {
+		indexes := g.indexes[:0]
+		for _, index := range g.indexes {
+			if !contextRecallOrdinaryUser(items[index]) {
+				indexes = append(indexes, index)
+			}
+		}
+		if len(indexes) > 0 {
+			toolGroups = append(toolGroups, contextItemGroup{indexes: indexes})
+		}
+	}
+	groups = toolGroups
 	grpOf := make(map[int]int, len(items))
 	for gi, g := range groups {
 		for _, index := range g.indexes {

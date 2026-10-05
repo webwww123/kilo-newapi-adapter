@@ -177,3 +177,89 @@ func estAllForTest(items []any) int {
 	}
 	return total
 }
+
+// Anthropic sessions can open a run of consecutive tool_use/tool_result
+// pairs from one ordinary user message, so the legacy group helper folds
+// that initiator into every completed group it touched. The initiator is
+// protected on its own merits — it must not link the independent groups
+// sharing it into one required span that sinks the whole selection.
+func TestContextRecallGroupfillSharedInitiator(t *testing.T) {
+	call := func(i int) map[string]any {
+		return map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "tool_use", "id": fmt.Sprintf("toolu_%d", i), "name": "read",
+				"input": map[string]any{"path": fmt.Sprintf("/var/log/svc-%d.log", i)}},
+		}}
+	}
+	result := func(i int, body string) map[string]any {
+		return map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": fmt.Sprintf("toolu_%d", i), "content": body},
+		}}
+	}
+	routine := func(i, lines int) string {
+		return strings.Repeat(fmt.Sprintf("svc-%d routine operational log line, status nominal\n", i), lines)
+	}
+	items := []any{
+		map[string]any{"role": "user", "content": "sweep every service log and report the recorded deployment token."},
+	}
+	// Eight consecutive completed groups share the initiating user. The
+	// baseline keeps only the newest three plus the whole current turn; the
+	// needle sits in the first (oldest) dropped result.
+	for i := 1; i <= 8; i++ {
+		body := routine(i, 220)
+		if i == 1 {
+			body = "deployment token HARBOR-5521-QZ recorded\n" + routine(1, 40)
+		}
+		items = append(items, call(i), result(i, body))
+	}
+	items = append(items,
+		map[string]any{"role": "user", "content": "what deployment token was recorded? answer with it only."},
+		call(9), result(9, routine(9, 30)))
+	// Baseline = pairs 6,7,8 (indexes 11-16) + current turn (17-19).
+	baselineIdx := []int{11, 12, 13, 14, 15, 16, 17, 18, 19}
+	var baseline []any
+	for _, i := range baselineIdx {
+		baseline = append(baseline, items[i])
+	}
+	est := func(idxs ...int) int {
+		total := 0
+		for _, i := range idxs {
+			total += contextEstimateAnyTokens(items[i]) + 4
+		}
+		return total
+	}
+	budget := est(0) + est(9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19) + est(1, 2) + 400
+	if total := estAllForTest(items); total <= budget {
+		t.Fatalf("test setup: total %d <= budget %d, recall would not run", total, budget)
+	}
+	payload := map[string]any{"messages": items}
+	engine := newContextRecallEngine()
+	engine.timeout = 5 * time.Second
+	metric := newContextRecallMetric()
+	kept, reason := engine.chooseMetric(context.Background(), payload, "messages", 1<<20, budget, metric, baseline)
+	if reason != "selected" {
+		t.Fatalf("reason=%s want selected: the shared initiator chained the groups", reason)
+	}
+	pos := groupfillPositions(kept, items)
+	for _, i := range baselineIdx {
+		if !pos[i] {
+			t.Fatalf("baseline item %d dropped from recall output", i)
+		}
+	}
+	// The initiator stays on its own merits; the dropped middle groups do
+	// not ride along through it.
+	if !pos[0] {
+		t.Fatalf("initiating user statement dropped from recall output")
+	}
+	if pos[5] || pos[6] {
+		t.Fatalf("shared initiator linked an independent old group into the output")
+	}
+	if !strings.Contains(contextRecallJoinedText(kept), "HARBOR-5521-QZ") {
+		t.Fatalf("needle turn not recalled")
+	}
+	if !contextToolHistorySafeToTrim(kept) {
+		t.Fatalf("output splits a tool call from its result")
+	}
+	if got := contextEstimateItemsTokens(kept); got > budget {
+		t.Fatalf("output estimate %d exceeds budget %d", got, budget)
+	}
+}
