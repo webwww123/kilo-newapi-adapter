@@ -8,7 +8,7 @@ import re
 import subprocess
 
 REPO = Path(__file__).resolve().parents[1]
-REVISION = 'eb0755e88e653867cc9f48952b5db6c30f1f8fb7'
+REVISION = '5c46d48dd2ccff1c41a2f7a671b8a92e89c8cfc0'
 
 
 def source(name):
@@ -16,7 +16,7 @@ def source(name):
 
 
 def build(destination, local_estimator=False):
-    original = {name: source(name) for name in ('context_recall.go', 'context_recall_control.go', 'context_trim.go', 'context_recall_fragments.go', 'context_recall_repeated.go', 'context_recall_repeated_test.go', 'context_recall_repeated_control_test.go')}
+    original = {name: source(name) for name in ('context_recall.go', 'context_recall_control.go', 'context_trim.go', 'context_recall_fragments.go', 'context_recall_repeated.go', 'context_recall_repeated_test.go', 'context_recall_repeated_control_test.go', 'context_recall_opaque_test.go')}
     core = original['context_recall.go'].replace('package adapter', 'package contextrecall', 1)
     fragments = original['context_recall_fragments.go'].replace('package adapter', 'package contextrecall', 1)
     fragments = fragments.replace('contextRecallRequest', 'Request').replace('selectTextItems(', 'SelectTextItems(').replace('selectText(', 'SelectText(')
@@ -105,7 +105,8 @@ func NewControlWithEstimator(path string, estimate func(any) int) *Control {
     policy_test = original['context_recall_repeated_control_test.go'].split('func TestContextRecallRepeatedHotDisablePreservesExistingPolicy', 1)[1]
     tests = tests.replace('package adapter', 'package contextrecall', 1).replace('"context"', '"context"\n"encoding/json"\n"os"\n"path/filepath"')
     tests += '\nfunc TestContextRecallRepeatedHotDisablePreservesExistingPolicy' + policy_test.replace('newContextRecallControl', 'NewControl')
-    outputs = {'selector.go': core, 'control.go': control, 'safety.go': safety, 'fragments.go': fragments, 'repeated.go': repeated, 'repeated_test.go': tests}
+    opaque_tests = original['context_recall_opaque_test.go'].replace('package adapter', 'package contextrecall', 1)
+    outputs = {'selector.go': core, 'control.go': control, 'safety.go': safety, 'fragments.go': fragments, 'repeated.go': repeated, 'repeated_test.go': tests, 'opaque_test.go': opaque_tests}
     for name, value in outputs.items():
         target = destination / name
         if target.exists() and (previous is None or name not in previous['output_sha256']):
