@@ -37,7 +37,7 @@ func (q *contextRecallRequest) selectTextItems(payload map[string]any, field str
 		}
 		before, _, ok1 := contextFragmentContent(original["content"])
 		after, replace, ok2 := contextFragmentContent(m["content"])
-		if !ok1 || !ok2 || !contextFragmentSameMetadata(original, m) || !contextFragmentContentMetadata(original["content"], m["content"]) {
+		if !ok1 || !ok2 || contextRecallHasOpaque(original) || contextRecallHasOpaque(m) || !contextFragmentSameMetadata(original, m) || !contextFragmentContentMetadata(original["content"], m["content"]) {
 			break
 		}
 		text, applied := q.selectText(before, after)
@@ -303,7 +303,7 @@ type contextShrinkPlan struct {
 
 func (r *contextRecallEngine) planItemShrink(item any) *contextShrinkPlan {
 	m, ok := item.(map[string]any)
-	if !ok || contextItemHasToolCall(m) || len(contextAnthropicToolResultIDSet(m)) > 0 {
+	if !ok || contextItemHasToolCall(m) || len(contextAnthropicToolResultIDSet(m)) > 0 || contextRecallHasOpaque(m) {
 		return nil
 	}
 	if role := contextItemRole(m); role != "user" && role != "assistant" {

@@ -959,7 +959,9 @@ func contextRecallSupported(value any) bool {
 			switch kind {
 			case "", "text", "input_text", "output_text", "message", "tool_use", "tool_result", "function", "function_call", "function_call_output":
 			default:
-				return false
+				if !contextRecallOpaqueType(kind) {
+					return false
+				}
 			}
 		}
 		for _, key := range []string{"content", "tool_calls", "function"} {
@@ -969,6 +971,44 @@ func contextRecallSupported(value any) bool {
 		}
 	}
 	return true
+}
+
+// Payload blocks that pass through untouched: Anthropic thinking and the
+// image/audio/file/video part types across the supported protocols. Their
+// bytes are never inspected, scored, shrunk or rewritten — the message
+// holding them is an atomic keep/drop unit. Unknown types stay rejected.
+func contextRecallOpaqueType(kind string) bool {
+	switch kind {
+	case "thinking", "redacted_thinking",
+		"image", "image_url", "input_image",
+		"audio", "input_audio", "output_audio",
+		"file", "input_file",
+		"video_url":
+		return true
+	}
+	return false
+}
+
+// Opaque payload anywhere inside an item marks the whole item atomic.
+func contextRecallHasOpaque(value any) bool {
+	switch v := value.(type) {
+	case []any:
+		for _, item := range v {
+			if contextRecallHasOpaque(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		if kind, ok := v["type"].(string); ok && contextRecallOpaqueType(kind) {
+			return true
+		}
+		for _, item := range v {
+			if contextRecallHasOpaque(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func contextRecallText(value any) string {
@@ -983,6 +1023,9 @@ func contextRecallText(value any) string {
 		}
 		return b.String()
 	case map[string]any:
+		if kind, ok := v["type"].(string); ok && contextRecallOpaqueType(kind) {
+			return ""
+		}
 		var b strings.Builder
 		for _, key := range []string{"content", "text", "output", "arguments", "tool_calls", "function", "name"} {
 			if item, ok := v[key]; ok {
