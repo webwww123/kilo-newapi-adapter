@@ -154,6 +154,7 @@ func TestKiloOnboardedFreeModelsGetHistoricalThinkingSignature(t *testing.T) {
 		"kilo/nex-agi/nex-n2.5-pro:free",
 		"kilo/nex-agi/nex-n2.5-mini:free",
 		"kilo/nvidia/nemotron-3.5-lightning:free",
+		"kilo/nvidia/nemotron-3-super-120b-a12b:free",
 		"kilo/inclusionai/ling-3.0-flash-fin:free",
 		"kilo/inclusionai/ling-3.0-flash-sante:free",
 		"kilo/inclusionai/ling-3.0-flash-vl:free",

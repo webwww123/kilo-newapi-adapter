@@ -30,6 +30,11 @@ func normalizeKiloToolHistoryRequest(body []byte, path string) ([]byte, toolHist
 		return body, stats, nil
 	}
 	switch strings.TrimPrefix(model, publicModelPrefix) {
+	case "nvidia/nemotron-3-super-120b-a12b:free":
+		// Only the Messages history schema was verified for this model.
+		if path != "/messages" {
+			return body, stats, nil
+		}
 	case stepfunFlashFreeModel, "kilo-auto/free", thinkingMachinesInklingFreeModel, thinkingMachinesInklingSmallFreeModel,
 		nexProFreeModel, nexMiniFreeModel, nemotronLightningFreeModel,
 		lingFinFreeModel, lingSanteFreeModel, lingVLFreeModel:
@@ -147,6 +152,7 @@ func toolHistoryStringValue(raw json.RawMessage) (string, bool) {
 func requiresThinkingSignature(model string) bool {
 	switch model {
 	case thinkingMachinesInklingFreeModel, thinkingMachinesInklingSmallFreeModel,
+		"nvidia/nemotron-3-super-120b-a12b:free",
 		nexProFreeModel, nexMiniFreeModel, nemotronLightningFreeModel,
 		lingFinFreeModel, lingSanteFreeModel, lingVLFreeModel:
 		return true
